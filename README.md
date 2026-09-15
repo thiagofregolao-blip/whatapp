@@ -60,7 +60,7 @@ A conexão Baileys usa saída de rede; **não precisa de webhook público nem t�
 
 ## IA, voz e áudio original
 
-Configure `ANTHROPIC_API_KEY` no backend e um `ANTHROPIC_MODEL` acessível pela conta (padrão `claude-sonnet-4-6`). Sem chave, a leitura e conexão continuam disponíveis; a IA informa a dependência. O texto consultado é enviado à Anthropic.
+Configure `OPENAI_API_KEY` no backend. O assistente usa `gpt-5.6-luna`; a voz usa `gpt-realtime-2.1-mini`. Sem chave, a leitura e conexão continuam disponíveis e a interface informa a configuração pendente. O texto consultado e o áudio de voz são enviados à OpenAI.
 
 Selecione uma mensagem e pergunte sobre ela. Sem seleção, a IA recebe até 80 mensagens dos últimos 7 dias, com até 2.000 caracteres de texto por mensagem. Seu histórico com a IA fica na aba atual.
 
@@ -96,3 +96,11 @@ Cobertura: 8 testes unitários; autorização exata, expiração, usuário/conta
 - Mensagens/payloads são armazenados sem criptografia de campo; as credenciais da sessão, sim. Proteja banco/disco e backups. Consultas excluem mensagens expiradas; limpeza física e retenção de rascunhos precisam de rotina operacional.
 - Sem histórico antigo, push, PWA ou transcrição de áudio recebido nesta versão. Mensagens próprias, status/newsletters, eventos de sistema e conteúdo de visualização única são ignorados.
 - Telas antigas com mocks ficam arquivadas em `frontend/legacy-pages`, fora das rotas ativas.
+
+## Luna e voz OpenAI
+
+O assistente ativo usa `gpt-5.6-luna` via Responses API. A conversa por voz usa `gpt-realtime-2.1-mini` por WebRTC e consulta a Luna para analisar mensagens. Configure `OPENAI_API_KEY` no backend (serviço `whatapp` no Railway). `OPENAI_MODEL` e `OPENAI_REALTIME_MODEL` permitem configurar os modelos. A chave nunca vai ao navegador. A assinatura de ChatGPT não substitui os créditos da API.
+
+Em `/assistant`, use **Conversar por voz**, permita o microfone e fale. O áudio do microfone vai à OpenAI; as consultas enviam o recorte de mensagens à Luna. **Encerrar voz**, sair da página ou ocultar a aba encerra a conexão e libera o microfone. Cada chamada tem limite local de 10 minutos. Não há ferramenta de envio na voz; a autorização de texto e destinatário continua na etapa de rascunho. Áudios recebidos do WhatsApp continuam disponíveis como original, sem transcrição automática.
+
+Sem a chave, a interface indica configuração pendente. O código Anthropic legado de digests não é usado pelo assistente ativo.

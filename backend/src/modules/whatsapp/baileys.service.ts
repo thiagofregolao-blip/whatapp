@@ -9,6 +9,7 @@ const logger = pino({ level: 'silent' })
 const runtimes = new Map<string, any>()
 const pending = new Map<string, Promise<any>>()
 let stopping = false
+let ownershipRetry: ReturnType<typeof setTimeout> | undefined
 const libPromise = () => import('@whiskeysockets/baileys')
 export const isBaileys = () => (process.env.WHATSAPP_PROVIDER || 'baileys') === 'baileys'
 
@@ -167,7 +168,15 @@ export async function restore() {
   // One backend owns all local sockets; a second instance must not fight for the session.
   const owner = await db.getClient()
   const lock = await owner.query("SELECT pg_try_advisory_lock(734920105) AS acquired")
-  if (!lock.rows[0].acquired) { owner.release(); throw new Error('Outro backend já controla as conexões Baileys neste banco') }
+  if (!lock.rows[0].acquired) {
+    owner.release()
+    // Let the new deployment pass HTTP health checks before the old owner shuts down.
+    // No WhatsApp socket is opened until this process exclusively owns the lock.
+    if (!stopping) ownershipRetry = setTimeout(() => {
+      if (!stopping) restore().catch(() => { console.error('[Baileys] Falha ao assumir sessões'); process.exit(1) })
+    }, 2000)
+    return
+  }
   owner.on('error', () => { shutdown(); process.exit(1) })
   const sessions = await db.query("SELECT * FROM whatsapp_sessions WHERE provider='baileys' AND status IN ('connected','connecting')")
   for (const s of sessions.rows) {
@@ -175,4 +184,4 @@ export async function restore() {
     try { await startSocket(s) } catch { await db.query("UPDATE whatsapp_sessions SET status='error',error_message='Falha ao restaurar sessão. Conecte novamente.' WHERE id=$1",[s.id]) }
   }
 }
-export function shutdown() { stopping = true; for (const r of runtimes.values()) { r.stopped=true; clearTimeout(r.retry); r.socket.end(new Error('Server shutdown')) } }
+export function shutdown() { stopping = true; clearTimeout(ownershipRetry); for (const r of runtimes.values()) { r.stopped=true; clearTimeout(r.retry); r.socket.end(new Error('Server shutdown')) } }
