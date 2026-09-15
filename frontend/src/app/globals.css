@@ -1,0 +1,67 @@
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  .theme {
+    --font-heading: var(--font-sans);
+    --font-sans: var(--font-sans);
+  }
+
+  :root {
+    --background: #0b1326;
+    --foreground: #dae2fd;
+    --card: #131b2e;
+    --card-foreground: #dae2fd;
+    --popover: #171f33;
+    --popover-foreground: #dae2fd;
+    --primary: #4ff07f;
+    --primary-foreground: #005523;
+    --secondary: #72d8c8;
+    --secondary-foreground: #003731;
+    --muted: #222a3d;
+    --muted-foreground: #bbcbb9;
+    --accent: #25d366;
+    --accent-foreground: #005523;
+    --destructive: #ffb4ab;
+    --destructive-foreground: #690005;
+    --border: rgba(60, 74, 61, 0.15);
+    --input: #060e20;
+    --ring: #3de273;
+    --radius: 0.75rem;
+    --sidebar: #0b1326;
+    --sidebar-foreground: #dae2fd;
+    --sidebar-primary: #4ff07f;
+    --sidebar-primary-foreground: #005523;
+    --sidebar-accent: #2d3449;
+    --sidebar-accent-foreground: #4ff07f;
+    --sidebar-border: rgba(60, 74, 61, 0.15);
+    --sidebar-ring: #3de273;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .grid-pattern {
+    background-image: radial-gradient(circle at 2px 2px, rgba(79, 240, 127, 0.05) 1px, transparent 0);
+    background-size: 40px 40px;
+  }
+  .glass-effect {
+    backdrop-filter: blur(24px);
+    background: rgba(45, 52, 73, 0.6);
+  }
+}

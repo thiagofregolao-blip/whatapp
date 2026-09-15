@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.next/
+out/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+*.zip
+.DS_Store
+
+.local/
+
+skill-observations/
