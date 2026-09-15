@@ -56,7 +56,7 @@ assistantRouter.get('/status', route(async (_req, res) => {
   res.json({ success: true, data: { configured: Boolean(process.env.OPENAI_API_KEY), model: textModel(), voice_model: voiceModel() } })
 }))
 const aiLimit = rateLimit({ windowMs: 60000, max: 20, keyGenerator: req => req.user!.id, standardHeaders: true, legacyHeaders: false, message: { error: 'Aguarde um minuto antes de fazer mais consultas à IA.' } })
-assistantRouter.use(['/chat', '/realtime'], aiLimit)
+assistantRouter.use(['/chat', '/realtime', '/suggest'], aiLimit)
 assistantRouter.post('/realtime', route(async (req, res) => {
   const { sdp } = z.object({ sdp: z.string().min(10).max(100000).startsWith('v=0') }).strict().parse(req.body)
   res.setHeader('Cache-Control', 'no-store')
@@ -69,6 +69,13 @@ assistantRouter.post('/chat', route(async (req, res) => {
   const rows = found.rows.map(m => ({ ...m, content: m.content?.slice(0, 2000) }))
   const answer = await askLuna(input.question, rows, input.history)
   res.json({ success: true, data: { answer, sources: rows.map(m => ({ id: m.id, chat_name: m.chat_name, sent_at: m.sent_at })) } })
+}))
+assistantRouter.post('/suggest', route(async (req, res) => {
+  const input = z.object({ message_id: z.string().uuid(), instruction: z.string().trim().max(4000).default('Sugira uma resposta curta e apropriada.') }).strict().parse(req.body)
+  const found = await db.query(`SELECT id, chat_id, chat_name, sender_name, content, media_type, sent_at FROM messages WHERE id=$1 AND user_id=$2 AND ${visible}`, [input.message_id, req.user!.id])
+  if (!found.rows.length) return res.status(404).json({ error: 'Mensagem indisponível' })
+  const content = z.string().trim().min(1).max(4000).parse(await askLuna(input.instruction, found.rows, [], 'reply'))
+  res.json({ success: true, data: await createDraft(req.user!.id, input.message_id, content) })
 }))
 assistantRouter.post('/drafts', route(async (req, res) => {
   const input = z.object({ message_id: z.string().uuid(), content: z.string().trim().min(1).max(4000) }).strict().parse(req.body)

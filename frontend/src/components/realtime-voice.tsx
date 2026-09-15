@@ -1,10 +1,16 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '@/lib/api'
+import { InboxMessage, ReviewDraft } from '@/lib/assistant-flow'
 
-type VoiceResources = { pc: RTCPeerConnection; stream?: MediaStream; channel?: RTCDataChannel; timer?: ReturnType<typeof setTimeout>; abort: AbortController }
+type VoiceResources = { pc: RTCPeerConnection; stream?: MediaStream; channel?: RTCDataChannel; timer?: ReturnType<typeof setTimeout>; abort: AbortController; pump?: ReturnType<typeof setInterval>; responding?: boolean; speaking?: boolean; audioPlaying?: boolean; pendingTools?: number; flush?: () => void }
 
-export default function RealtimeVoice({ messageId }: { messageId?: string }) {
+type Props = { messageId?: string; incoming: InboxMessage[]; draft: ReviewDraft | null; onAction: (name: string, args: any) => Promise<any>; onConfirm: (text: string, draftId: string) => Promise<any>; voiceEvent: { id: number; text: string } | null }
+export default function RealtimeVoice(props: Props) {
+  const { messageId } = props
+  const latest = useRef(props); latest.current = props
+  const announced = useRef(new Set<string>())
+  const lastVoiceEvent = useRef(0)
   const [phase, setPhase] = useState<'idle' | 'connecting' | 'connected'>('idle')
   const [error, setError] = useState('')
   const [caption, setCaption] = useState('')
@@ -17,7 +23,7 @@ export default function RealtimeVoice({ messageId }: { messageId?: string }) {
   function stop() {
     const r = resources.current
     resources.current = null
-    if (r) { clearTimeout(r.timer); r.abort.abort(); r.stream?.getTracks().forEach(t => t.stop()); r.channel?.close(); r.pc.close() }
+    if (r) { clearTimeout(r.timer); clearInterval(r.pump); r.abort.abort(); r.stream?.getTracks().forEach(t => t.stop()); r.channel?.close(); r.pc.close() }
     if (player.current) { player.current.pause(); player.current.srcObject = null }
     setPhase('idle')
   }
@@ -54,26 +60,65 @@ export default function RealtimeVoice({ messageId }: { messageId?: string }) {
       }
       const channel = r.pc.createDataChannel('oai-events'); r.channel = channel
       const handled = new Set<string>()
+      const speechDrafts = new Map<string, string>()
+      const transcribed = new Set<string>()
+      const respond = () => { r.responding = true; channel.send(JSON.stringify({ type: 'response.create' })) }
+      const tell = (text: string) => { channel.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } })); respond() }
+      r.flush = () => {
+        if (!current() || channel.readyState !== 'open' || r.responding || r.speaking || r.audioPlaying || r.pendingTools) return
+        const event = latest.current.voiceEvent
+        if (event && lastVoiceEvent.current !== event.id) { lastVoiceEvent.current = event.id; tell(event.text); return }
+        if (latest.current.draft) return
+        const fresh = latest.current.incoming.filter(m => !announced.current.has(m.id)).slice(-5)
+        if (!fresh.length) return
+        fresh.forEach(m => announced.current.add(m.id))
+        tell(JSON.stringify({ evento: 'novas_mensagens', orientacao: 'Avise quem escreveu e pergunte se quero saber o conteúdo. Não leia ainda.', mensagens: fresh.map(m => ({ message_id: m.id, remetente: m.sender_name, conversa: m.chat_name, tipo: m.media_type })) }))
+      }
+      channel.onopen = () => r.flush?.()
+      r.pump = setInterval(() => r.flush?.(), 1000)
       channel.onmessage = async event => {
         if (!current()) return
         let data: any
         try { data = JSON.parse(event.data) } catch { return }
+        if (data.type === 'response.created') r.responding = true
+        if (data.type === 'response.done') r.responding = false
+        if (data.type === 'output_audio_buffer.started') r.audioPlaying = true
+        if (data.type === 'output_audio_buffer.stopped' || data.type === 'output_audio_buffer.cleared') r.audioPlaying = false
+        if (data.type === 'input_audio_buffer.speech_started') {
+          r.speaking = true
+          const d = latest.current.draft
+          // Bind confirmation to the exact review that existed BEFORE this utterance.
+          // Never authorize from assistant output or a transcript from an earlier draft.
+          if (d && !r.responding && !r.audioPlaying && !r.pendingTools) speechDrafts.set(data.item_id, d.id)
+        }
+        if (data.type === 'input_audio_buffer.speech_stopped') r.speaking = false
+        if (data.type === 'conversation.item.input_audio_transcription.completed' && !transcribed.has(data.item_id)) {
+          transcribed.add(data.item_id)
+          const id = speechDrafts.get(data.item_id); speechDrafts.delete(data.item_id)
+          if (id && typeof data.transcript === 'string') await latest.current.onConfirm(data.transcript, id)
+        }
         if (data.type === 'response.output_audio_transcript.done') setCaption(data.transcript)
         if (data.type === 'error') { stop(); setError('A OpenAI interrompeu a sessão de voz. Verifique a configuração e tente novamente.'); return }
         if (data.type !== 'response.function_call_arguments.done' || handled.has(data.call_id)) return
         handled.add(data.call_id)
+        r.pendingTools = (r.pendingTools || 0) + 1
         let output: any = { error: 'Ferramenta indisponível. Nenhuma ação executada.' }
         try {
+          const args = JSON.parse(data.arguments)
           if (data.name === 'consultar_luna') {
-            const args = JSON.parse(data.arguments)
             if (typeof args.question !== 'string') throw new Error('Pergunta inválida')
             setCaption('Luna está consultando suas mensagens…')
-            output = await api('/api/assistant/chat', { method: 'POST', signal: r.abort.signal, body: JSON.stringify({ question: args.question, message_id: selected.current, history: [] }) })
+            output = await api('/api/assistant/chat', { method: 'POST', signal: r.abort.signal, body: JSON.stringify({ question: args.question, message_id: args.message_id || selected.current, history: [] }) })
+          } else if (['abrir_mensagem', 'preparar_resposta', 'cancelar_resposta', 'ouvir_audio'].includes(data.name)) {
+            if (data.name !== 'cancelar_resposta' && typeof args.message_id !== 'string') throw new Error('Selecione a mensagem correta antes de continuar.')
+            if (data.name === 'preparar_resposta' && (typeof args.content !== 'string' || !args.content.trim() || args.content.length > 4000)) throw new Error('Texto de resposta inválido.')
+            output = await latest.current.onAction(data.name, args)
           }
         } catch (e: any) { output = { error: e.message }; if (current()) setError(e.message) }
+        r.pendingTools = Math.max(0, (r.pendingTools || 1) - 1)
         if (!current() || channel.readyState !== 'open') return
         channel.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: data.call_id, output: JSON.stringify(output) } }))
-        channel.send(JSON.stringify({ type: 'response.create' }))
+        respond()
       }
       const offer = await r.pc.createOffer(); await r.pc.setLocalDescription(offer)
       const answer = await api('/api/assistant/realtime', { method: 'POST', signal: r.abort.signal, body: JSON.stringify({ sdp: offer.sdp }) })
@@ -82,10 +127,10 @@ export default function RealtimeVoice({ messageId }: { messageId?: string }) {
   }
   return <div className="rounded-2xl border border-emerald-400/30 bg-[#172a32] p-4">
     <h2 className="font-semibold">Luna · voz em tempo real</h2>
-    <p className="text-sm text-slate-300 mt-2">Converse por voz e peça à Luna para analisar suas mensagens. A voz é gerada por IA.</p>
+    <p className="text-sm text-slate-300 mt-2">Luna avisa quando chega mensagem, lê quando você pede e preenche sua resposta. A voz é gerada por IA.</p>
     {configured === false && <p role="status" className="text-amber-200 text-sm mt-2">Aguardando a chave da OpenAI no Railway. Texto e voz serão ativados após configurar OPENAI_API_KEY no serviço whatapp.</p>}
-    <p className="text-xs text-slate-400 my-3">Ao iniciar, seu microfone é enviado à OpenAI; consultas à Luna usam as mensagens do recorte selecionado. A API é cobrada por uso. Encerre quando terminar. A voz não envia mensagens.</p>
-    <button disabled={configured === false && phase === 'idle'} onClick={phase === 'idle' ? start : stop} className="rounded-xl bg-[#4ff07f] text-[#00351b] px-4 py-3 font-semibold disabled:opacity-40">{phase === 'idle' ? 'Conversar por voz' : phase === 'connecting' ? 'Cancelar conexão' : 'Encerrar voz'}</button>
+    <p className="text-xs text-slate-400 my-3">Ao iniciar, seu microfone é enviado à OpenAI; consultas à Luna usam as mensagens do recorte selecionado. A API é cobrada por uso. Encerre quando terminar. O envio exige revisão e confirmação pelo botão ou pela frase com o código do rascunho. Mantenha esta página aberta para os avisos por voz.</p>
+    <button disabled={configured === false && phase === 'idle'} onClick={phase === 'idle' ? start : stop} className="rounded-xl bg-[#4ff07f] text-[#00351b] px-4 py-3 font-semibold disabled:opacity-40">{phase === 'idle' ? 'Ativar assistente por voz' : phase === 'connecting' ? 'Cancelar conexão' : 'Encerrar voz'}</button>
     <p role="status" className="text-sm mt-2">{phase === 'connected' ? 'Microfone ativo · pode falar e interromper a resposta' : phase === 'connecting' ? 'Conectando…' : ''}</p>
     {error && <p role="alert" className="text-red-200 text-sm mt-2">{error}</p>}
     {caption && <p aria-live="polite" className="text-sm text-slate-200 mt-3 whitespace-pre-wrap">{caption}</p>}

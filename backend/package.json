@@ -9,7 +9,8 @@
     "start": "node dist/server.js",
     "db:migrate": "node scripts/migrate.js",
     "test": "npm run build && node --test dist/modules/assistant/*.test.js",
-    "test:integration": "npm run build && node scripts/integration-test.cjs"
+    "test:integration": "npm run build && node scripts/integration-test.cjs",
+    "test:flow": "npm run build && node scripts/assistant-flow-test.cjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",

@@ -21,13 +21,13 @@ test('OpenAI: bounded read-only requests, response parsing and secret stays serv
     assert.equal(await askLuna('Resumo?', [{content:'fixture'}], []), 'Resposta de teste')
     global.fetch = (async (_url: any, options: any) => {
       const session = JSON.parse(options.body.get('session'))
-      assert.deepEqual(session.tools.map((t: any) => t.name), ['consultar_luna'])
+      assert.deepEqual(session.tools.map((t: any) => t.name), ['consultar_luna', 'abrir_mensagem', 'preparar_resposta', 'cancelar_resposta', 'ouvir_audio'])
       assert.equal(options.body.get('sdp'), 'v=0\r\nfixture')
       assert.ok(!JSON.stringify(session).includes('test-only-placeholder'))
       return new Response('v=0\r\nanswer')
     }) as typeof fetch
     assert.equal(await createVoiceCall('v=0\r\nfixture'), 'v=0\r\nanswer')
-    assert.equal(realtimeConfig().tools.length, 1)
+    assert.ok(realtimeConfig().tools.every(t => !/enviar|send|autorizar/.test(t.name)))
     global.fetch = (async () => new Response('{}', {status:401})) as typeof fetch
     await assert.rejects(askLuna('oi', [], []), /401/)
     delete process.env.OPENAI_API_KEY
