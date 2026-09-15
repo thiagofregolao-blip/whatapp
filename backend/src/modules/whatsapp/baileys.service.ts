@@ -179,8 +179,11 @@ export async function syncGroups(userId: string) {
   const r = runtimes.get(userId)
   if (!r?.open) throw new Error('WhatsApp não conectado')
   const groups: any = await r.socket.groupFetchAllParticipating()
-  for (const group of Object.values(groups) as any[]) await db.query(`INSERT INTO groups(user_id,session_id,whatsapp_chat_id,name,participant_count,synced_at) VALUES($1,$2,$3,$4,$5,NOW())
+  for (const group of Object.values(groups) as any[]) {
+    await db.query(`INSERT INTO groups(user_id,session_id,whatsapp_chat_id,name,participant_count,synced_at) VALUES($1,$2,$3,$4,$5,NOW())
     ON CONFLICT(user_id,whatsapp_chat_id) DO UPDATE SET name=$4,participant_count=$5,session_id=$2,synced_at=NOW()`,[userId,r.session.id,group.id,group.subject,group.participants?.length || 0])
+    await db.query(`INSERT INTO whatsapp_chats(user_id,account_id,chat_id,name) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,account_id,chat_id) DO UPDATE SET name=$4`,[userId,r.session.unipile_account_id,group.id,group.subject])
+  }
 }
 export function assertLiveAccount(draft: any, runtime: any) {
   if (!runtime?.open || runtime.stopped || runtime.session.unipile_account_id !== draft.account_id || runtime.session.user_id !== draft.user_id || runtime.session.id !== draft.session_id) throw new Error('A conta conectada mudou ou está offline')
