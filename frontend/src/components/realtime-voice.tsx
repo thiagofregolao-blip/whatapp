@@ -5,7 +5,7 @@ import { InboxMessage, ReviewDraft } from '@/lib/assistant-flow'
 
 type VoiceResources = { pc: RTCPeerConnection; stream?: MediaStream; channel?: RTCDataChannel; timer?: ReturnType<typeof setTimeout>; abort: AbortController; pump?: ReturnType<typeof setInterval>; responding?: boolean; needsResponse?: boolean; speaking?: boolean; audioPlaying?: boolean; pendingTools?: number; flush?: () => void }
 
-type Props = { messageId?: string; incoming: InboxMessage[]; draft: ReviewDraft | null; onAction: (name: string, args: any) => Promise<any>; onConfirm: (text: string, draftId: string) => Promise<any>; voiceEvent: { id: number; text: string } | null }
+type Props = { messageId?: string; incoming: InboxMessage[]; draft: ReviewDraft | null; onAction: (name: string, args: any) => Promise<any>; voiceEvent: { id: number; text: string } | null }
 export default function RealtimeVoice(props: Props) {
   const { messageId } = props
   const latest = useRef(props); latest.current = props
@@ -60,8 +60,8 @@ export default function RealtimeVoice(props: Props) {
       }
       const channel = r.pc.createDataChannel('oai-events'); r.channel = channel
       const handled = new Set<string>()
-      const speechDrafts = new Map<string, string>()
-      const transcribed = new Set<string>()
+      const sentUtterances = new Set<string>()
+      let userUtterance: string | null = null
       const respond = () => {
         r.needsResponse = true
         if (r.responding || r.speaking || r.audioPlaying || r.pendingTools) return
@@ -92,17 +92,9 @@ export default function RealtimeVoice(props: Props) {
         if (data.type === 'output_audio_buffer.stopped' || data.type === 'output_audio_buffer.cleared') r.audioPlaying = false
         if (data.type === 'input_audio_buffer.speech_started') {
           r.speaking = true
-          const d = latest.current.draft
-          // Bind confirmation to the exact review that existed BEFORE this utterance.
-          // Never authorize from assistant output or a transcript from an earlier draft.
-          if (d && !r.responding && !r.audioPlaying && !r.pendingTools) speechDrafts.set(data.item_id, d.id)
+          userUtterance = data.item_id || null
         }
         if (data.type === 'input_audio_buffer.speech_stopped') r.speaking = false
-        if (data.type === 'conversation.item.input_audio_transcription.completed' && !transcribed.has(data.item_id)) {
-          transcribed.add(data.item_id)
-          const id = speechDrafts.get(data.item_id); speechDrafts.delete(data.item_id)
-          if (id && typeof data.transcript === 'string') await latest.current.onConfirm(data.transcript, id)
-        }
         if (data.type === 'response.output_audio_transcript.done') setCaption(data.transcript)
         if (data.type === 'error') { stop(); setError('A OpenAI interrompeu a sessão de voz. Verifique a configuração e tente novamente.'); return }
         if (data.type !== 'response.function_call_arguments.done' || handled.has(data.call_id)) return
@@ -115,9 +107,13 @@ export default function RealtimeVoice(props: Props) {
             if (typeof args.question !== 'string') throw new Error('Pergunta inválida')
             setCaption('Luna está consultando suas mensagens…')
             output = await api('/api/assistant/chat', { method: 'POST', signal: r.abort.signal, body: JSON.stringify({ question: args.question, message_id: args.message_id || selected.current, history: [] }) })
-          } else if (['abrir_mensagem', 'preparar_resposta', 'cancelar_resposta', 'ouvir_audio'].includes(data.name)) {
+          } else if (['abrir_mensagem', 'preparar_resposta', 'cancelar_resposta', 'ouvir_audio', 'enviar_resposta'].includes(data.name)) {
             if (data.name !== 'cancelar_resposta' && typeof args.message_id !== 'string') throw new Error('Selecione a mensagem correta antes de continuar.')
-            if (data.name === 'preparar_resposta' && (typeof args.content !== 'string' || !args.content.trim() || args.content.length > 4000)) throw new Error('Texto de resposta inválido.')
+            if (['preparar_resposta', 'enviar_resposta'].includes(data.name) && (typeof args.content !== 'string' || !args.content.trim() || args.content.length > 4000)) throw new Error('Texto de resposta inválido.')
+            if (data.name === 'enviar_resposta') {
+              if (!userUtterance || sentUtterances.has(userUtterance)) throw new Error('Este pedido de envio já foi processado. Não repita.')
+              sentUtterances.add(userUtterance)
+            }
             output = await latest.current.onAction(data.name, args)
           }
         } catch (e: any) { output = { error: e.message }; if (current()) setError(e.message) }
@@ -135,7 +131,7 @@ export default function RealtimeVoice(props: Props) {
     <h2 className="font-semibold">Luna · voz em tempo real</h2>
     <p className="text-sm text-slate-300 mt-2">Luna avisa quando chega mensagem, lê quando você pede e preenche sua resposta. A voz é gerada por IA.</p>
     {configured === false && <p role="status" className="text-amber-200 text-sm mt-2">Aguardando a chave da OpenAI no Railway. Texto e voz serão ativados após configurar OPENAI_API_KEY no serviço whatapp.</p>}
-    <p className="text-xs text-slate-400 my-3">Ao iniciar, seu microfone é enviado à OpenAI; consultas à Luna usam as mensagens do recorte selecionado. A API é cobrada por uso. Encerre quando terminar. O envio exige revisão e confirmação pelo botão ou pela frase com o código do rascunho. Mantenha esta página aberta para os avisos por voz.</p>
+    <p className="text-xs text-slate-400 my-3">Ao iniciar, seu microfone é enviado à OpenAI; consultas à Luna usam as mensagens do recorte selecionado. A API é cobrada por uso. Encerre quando terminar. Para enviar, basta pedir à Luna. Mantenha esta página aberta para os avisos por voz.</p>
     <button disabled={configured === false && phase === 'idle'} onClick={phase === 'idle' ? start : stop} className="rounded-xl bg-[#4ff07f] text-[#00351b] px-4 py-3 font-semibold disabled:opacity-40">{phase === 'idle' ? 'Ativar assistente por voz' : phase === 'connecting' ? 'Cancelar conexão' : 'Encerrar voz'}</button>
     <p role="status" className="text-sm mt-2">{phase === 'connected' ? 'Microfone ativo · pode falar e interromper a resposta' : phase === 'connecting' ? 'Conectando…' : ''}</p>
     {error && <p role="alert" className="text-red-200 text-sm mt-2">{error}</p>}

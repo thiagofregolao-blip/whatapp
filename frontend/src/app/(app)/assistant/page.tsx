@@ -4,7 +4,7 @@ import Link from 'next/link'
 import RealtimeVoice from '@/components/realtime-voice'
 import { api, getMessages, getToken } from '@/lib/api'
 import { useApp } from '@/lib/app-context'
-import { InboxMessage as Message, ReviewDraft as Draft, unseenMessages, canConfirm } from '@/lib/assistant-flow'
+import { InboxMessage as Message, ReviewDraft as Draft, unseenMessages, isSendCommand } from '@/lib/assistant-flow'
 
 type Turn = { role: 'user' | 'assistant'; content: string }
 
@@ -30,10 +30,9 @@ export default function Assistant() {
   function selectMessage(m: Message | null) { invalidateDraft(); setSelected(m); setReply('') }
   function editReply(value: string) { invalidateDraft(); setReply(value) }
   function installDraft(value: any) {
-    const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 9000 + 1000)
-    const ready: Draft = { ...value, voice_code: code }
+    const ready: Draft = value
     setReply(ready.content); setDraft(ready)
-    return { message_id: value.message_id, recipient: ready.recipient, content: ready.content, confirmacao_voz: `confirmo envio ${code.split('').join(' ')}`, status: 'awaiting_confirmation' }
+    return { message_id: value.message_id, recipient: ready.recipient, content: ready.content, status: 'draft_ready' }
   }
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -103,7 +102,7 @@ export default function Assistant() {
       })
       if (revision.current !== version) throw new Error('A seleção ou o texto mudou. O rascunho anterior não foi aplicado.')
       const review = installDraft(result)
-      setNotice('Resposta preenchida. Confira o texto e autorize o envio.')
+      setNotice('Resposta pronta.')
       setTimeout(() => document.getElementById('reply')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0)
       return review
     } finally { setBusy(false) }
@@ -114,6 +113,19 @@ export default function Assistant() {
   async function ask(text = question) {
     if (!text.trim() || busy) return
     setQuestion(''); setError(''); setTurns(old => [...old, { role: 'user', content: text }])
+    if (isSendCommand(text)) {
+      try {
+        if (!selected) throw new Error('Para quem? Selecione a conversa.')
+        const short = /^(?:luna[, ]+)?(?:por favor[, ]+)?(?:pode )?(?:envia|enviar|envie|manda|mandar|mande)(?: (?:agora|isso|essa mensagem|a mensagem|a resposta))?[.! ]*$/i.test(text.trim())
+        if (!short && !/^(?:luna[, ]+)?(?:por favor[, ]+)?(?:pode )?(?:envia|enviar|envie|manda|mandar|mande) (?:dizendo|que|com o texto)\b/i.test(text.trim())) throw new Error('Selecione a conversa e escreva a resposta no campo; depois peça para enviar.')
+        if (!short) await makeReply(selected.id, undefined, text)
+        else if (!draftRef.current && reply.trim()) await makeReply(selected.id, reply)
+        if (!draftRef.current) throw new Error('Qual mensagem você quer enviar?')
+        const result = await authorize()
+        setTurns(old => [...old, { role: 'assistant', content: typeof result === 'string' ? result : result.status === 'sent' ? 'Enviado.' : 'Não consegui confirmar o envio.' }])
+      } catch (e: any) { setError(e.message) }
+      return
+    }
     if (/\b(toca|toque|reproduz|reproduza|ouvir)\b.*\b[áa]udio\b/i.test(text)) {
       const m = selected?.media_type === 'audio' ? selected : null
       setTurns(old => [...old, { role: 'assistant', content: m ? 'Vou abrir o áudio original da mensagem selecionada.' : 'Selecione a mensagem de áudio na caixa de entrada e toque em Ouvir original.' }])
@@ -133,7 +145,7 @@ export default function Assistant() {
     if (!selected || !reply.trim()) return
     try { await makeReply(selected.id, reply) } catch (e: any) { setError(e.message) }
   }
-  async function authorize(expectedId?: string) {
+  async function authorize(expectedId?: string, announce = true) {
     const d = draftRef.current
     if (!d || sendLock.current || (expectedId && d.id !== expectedId)) return 'Não há um rascunho válido para este envio.'
     if (new Date(d.expires_at).getTime() <= Date.now()) { invalidateDraft(); return 'Rascunho expirado. Prepare novamente.' }
@@ -141,19 +153,20 @@ export default function Assistant() {
     try {
       await api(`/api/assistant/drafts/${d.id}/send`, { method: 'POST', body: JSON.stringify({ authorize: true, confirmation_token: d.confirmation_token, chat_id: d.chat_id, content: d.content }) })
       const result = `Mensagem enviada para ${d.recipient}.`
-      setNotice(result); setReply(''); setVoiceEvent({ id: Date.now(), text: `resultado_envio: status sent. ${result}` })
-      return result
+      setNotice(result); setReply(''); if (announce) setVoiceEvent({ id: Date.now(), text: `resultado_envio: status sent. Diga apenas: Enviado.` })
+      return { status: 'sent', message: 'Enviado.' }
     } catch (e: any) {
-      setError(e.message); setVoiceEvent({ id: Date.now(), text: `resultado_envio: status unknown. Não confirme sucesso. ${e.message}` }); return e.message
+      setError(e.message); if (announce) setVoiceEvent({ id: Date.now(), text: `resultado_envio: status unknown. Não confirme sucesso. ${e.message}` }); return { status: 'unknown', error: e.message }
     } finally { sendLock.current = false; setBusy(false) }
-  }
-  async function confirmVoice(text: string, expectedId: string) {
-    if (!canConfirm(draftRef.current, expectedId, text)) return null
-    return authorize(expectedId)
   }
   async function voiceAction(name: string, args: any) {
     if (name === 'cancelar_resposta') { invalidateDraft(); return { status: 'cancelled', message: 'Rascunho cancelado. A confirmação anterior não pode enviar.' } }
     const m = findMessage(args.message_id)
+    if (name === 'enviar_resposta') {
+      const current = draftRef.current
+      if (!current || current.chat_id !== m.chat_id || current.content !== args.content) await makeReply(m.id, args.content)
+      return authorize(draftRef.current?.id, false)
+    }
     if (name === 'preparar_resposta') return makeReply(m.id, args.content)
     if (name === 'abrir_mensagem') {
       if (!draftRef.current && !busy) selectMessage(m)
@@ -167,7 +180,7 @@ export default function Assistant() {
     throw new Error('Ação não suportada')
   }
   return <main className="max-w-6xl mx-auto px-4 py-6 pb-16">
-    <div className="flex flex-wrap items-center justify-between gap-4 mb-6"><div><p className="text-xs tracking-widest uppercase text-[#72d8c8]">Seu WhatsApp, com contexto</p><h1 className="text-3xl font-semibold mt-2">O que merece sua atenção?</h1><p className="text-sm text-slate-400 mt-2">Pergunte, ouça o original e prepare respostas. Você autoriza cada envio.</p></div><span className="text-sm rounded-full border border-white/15 px-3 py-2">{session?.status === 'connected' ? '● WhatsApp conectado' : '○ WhatsApp não conectado'}</span></div>
+    <div className="flex flex-wrap items-center justify-between gap-4 mb-6"><div><p className="text-xs tracking-widest uppercase text-[#72d8c8]">Seu WhatsApp, com contexto</p><h1 className="text-3xl font-semibold mt-2">O que merece sua atenção?</h1><p className="text-sm text-slate-400 mt-2">Pergunte, ouça o original e prepare respostas. Basta pedir para enviar.</p></div><span className="text-sm rounded-full border border-white/15 px-3 py-2">{session?.status === 'connected' ? '● WhatsApp conectado' : '○ WhatsApp não conectado'}</span></div>
     {session?.status !== 'connected' && <div className="rounded-2xl bg-[#172a32] p-4 mb-5">Conecte sua conta para receber novas mensagens. <Link className="text-[#4ff07f] underline" href="/onboarding/connect">Conectar por QR Code</Link></div>}
     {error && <p role="alert" className="rounded-xl bg-red-950 p-4 text-red-100 mb-4">{error}</p>}
     {notice && <p role="status" className="rounded-xl bg-emerald-950 p-4 mb-4">{notice}</p>}
@@ -176,7 +189,7 @@ export default function Assistant() {
         {loading ? <p>Carregando mensagens…</p> : !messages.length ? <p className="text-slate-400 py-8">Nenhuma mensagem recebida ainda. Novas mensagens aparecerão aqui após a conexão.</p> : <div className="space-y-2 max-h-[420px] lg:max-h-[680px] overflow-y-auto">{messages.map(m => <button key={m.id} onClick={() => selectMessage(m)} className={`w-full text-left rounded-xl p-3 border ${selected?.id === m.id ? 'border-[#4ff07f] bg-emerald-950/40' : 'border-white/5 bg-white/[.02]'}`}><div className="flex justify-between gap-2"><strong className="text-sm break-words">{m.chat_name || m.sender_name || m.chat_id}</strong>{m.urgency_score >= 4 && <span className="text-xs text-amber-300">Atenção</span>}</div><p className="text-xs text-slate-400 mt-1">{m.sender_name || 'Contato'} · {new Date(m.sent_at).toLocaleString('pt-BR')}</p><p className="text-sm mt-2 line-clamp-2 break-words">{m.media_type === 'audio' ? '▶ Mensagem de áudio' : m.content || 'Anexo recebido'}</p></button>)}</div>}
       </section>
       <section className="space-y-4 min-w-0">
-        <RealtimeVoice messageId={selected?.id} incoming={incoming} draft={draft} onAction={voiceAction} onConfirm={confirmVoice} voiceEvent={voiceEvent} />
+        <RealtimeVoice messageId={selected?.id} incoming={incoming} draft={draft} onAction={voiceAction} voiceEvent={voiceEvent} />
         {incoming.length > 0 && <div className="rounded-2xl bg-emerald-950 border border-emerald-400/30 p-4" role="status"><p className="font-semibold">Luna: chegou mensagem. Quer saber o que é?</p><div className="space-y-2 mt-3">{incoming.slice(-5).map(m => <div key={m.id} className="flex flex-wrap gap-2 items-center"><span className="text-sm flex-1">{m.sender_name || m.chat_name || 'Contato'} · {m.chat_name || 'Conversa'}</span><button className={button} onClick={() => { selectMessage(m); setIncoming(old => old.filter(x => x.id !== m.id)) }}>Ler mensagem</button><button className={button} disabled={busy} onClick={() => suggest(m.id)}>Preparar resposta</button><button className={button} onClick={() => setIncoming(old => old.filter(x => x.id !== m.id))}>Depois</button></div>)}</div></div>}
         {selected && <div className="rounded-2xl bg-[#172a32] border border-[#4ff07f]/30 p-4"><div className="flex justify-between gap-3"><h2 className="font-semibold">Selecionada: {selected.chat_name || selected.sender_name || selected.chat_id}</h2><button aria-label="Limpar seleção" onClick={() => selectMessage(null)}>✕</button></div><p className="text-xs text-slate-400 mt-1">Conversa: {selected.chat_id}</p><p className="whitespace-pre-wrap break-words my-3">{selected.content || (selected.media_type === 'audio' ? 'Áudio recebido · conteúdo não transcrito' : 'Mensagem sem texto')}</p>{selected.media_type === 'audio' && <button className={button} onClick={() => playOriginal(selected)}>▶ Ouvir original</button>}</div>}
         {audioUrl && <div className="rounded-xl bg-[#172a32] p-3"><p className="text-xs mb-2">Áudio original · {audioLabel}</p><audio ref={audio} src={audioUrl} controls autoPlay className="w-full" onError={() => setError('O navegador não reproduziu este formato de áudio.')} /></div>}
@@ -186,8 +199,8 @@ export default function Assistant() {
           <form onSubmit={e => { e.preventDefault(); ask() }}><label htmlFor="question" className="sr-only">Pergunta para a IA</label><textarea id="question" value={question} onChange={e => setQuestion(e.target.value)} placeholder="Pergunte ou diga “toca o áudio”…" rows={2} maxLength={4000} className="w-full bg-[#060e20] rounded-xl p-3 text-base border border-white/15" /><div className="flex justify-between gap-2 mt-2"><button type="button" className={button} onClick={() => dictate('question')}>{listening ? 'Parar ditado' : '🎙 Ditar pergunta'}</button><button disabled={busy || !question.trim()} className={`${button} bg-[#4ff07f] text-[#00351b] font-semibold`}>Perguntar</button></div></form>
           {!voiceSupported && <p className="text-xs text-slate-400 mt-2">Se o ditado do navegador não estiver disponível, use o microfone do teclado do iPhone.</p>}
         </div>
-        {selected && <div className="rounded-2xl border border-white/10 p-4 bg-[#131b2e]"><h2 className="font-semibold">Sua resposta</h2><p className="text-sm text-slate-400 my-2">Luna preenche a sugestão aqui. Você pode editar, revisar e autorizar o envio.</p><label htmlFor="reply" className="sr-only">Texto da resposta</label><textarea id="reply" disabled={busy} rows={3} maxLength={4000} value={reply} onChange={e => editReply(e.target.value)} className="w-full bg-[#060e20] rounded-xl p-3 text-base border border-white/15" /><div className="flex flex-wrap gap-2 mt-2"><button className={button} onClick={() => dictate('reply')}>🎙 Ditar resposta</button><button disabled={busy || !reply.trim()} className={button} onClick={prepare}>Revisar rascunho</button></div>
-          {draft && <div className="mt-4 p-4 rounded-xl border border-amber-400/60"><h3 className="font-semibold text-amber-200">Autorizar este envio</h3><p className="mt-2">Para: <strong>{draft.recipient}</strong></p><p className="text-xs text-slate-400 break-all">Conversa: {draft.chat_id}</p><p className="whitespace-pre-wrap break-words my-4">{draft.content}</p><p className="text-xs mb-3">Expira às {new Date(draft.expires_at).toLocaleTimeString('pt-BR')}. O botão abaixo autoriza exatamente este texto nesta conversa.</p><p className="text-sm text-amber-100 mb-3">Para confirmar por voz, diga: <strong>confirmo envio {draft.voice_code.split('').join(' ')}</strong>. Editar o texto ou trocar de conversa cancela esta autorização.</p><div className="flex flex-wrap gap-2"><button disabled={busy} onClick={() => authorize()} className={`${button} bg-[#4ff07f] text-[#00351b] font-semibold`}>Autorizar e enviar agora</button><button disabled={busy} onClick={invalidateDraft} className={button}>Cancelar</button></div></div>}
+        {selected && <div className="rounded-2xl border border-white/10 p-4 bg-[#131b2e]"><h2 className="font-semibold">Sua resposta</h2><p className="text-sm text-slate-400 my-2">Luna preenche a sugestão aqui. Você pode editar ou pedir para enviar.</p><label htmlFor="reply" className="sr-only">Texto da resposta</label><textarea id="reply" disabled={busy} rows={3} maxLength={4000} value={reply} onChange={e => editReply(e.target.value)} className="w-full bg-[#060e20] rounded-xl p-3 text-base border border-white/15" /><div className="flex flex-wrap gap-2 mt-2"><button className={button} onClick={() => dictate('reply')}>🎙 Ditar resposta</button><button disabled={busy || !reply.trim()} className={button} onClick={prepare}>Revisar rascunho</button></div>
+          {draft && <div className="mt-4 p-4 rounded-xl border border-amber-400/60"><h3 className="font-semibold text-amber-200">Resposta pronta</h3><p className="mt-2">Para: <strong>{draft.recipient}</strong></p><p className="text-xs text-slate-400 break-all">Conversa: {draft.chat_id}</p><p className="whitespace-pre-wrap break-words my-4">{draft.content}</p><p className="text-xs mb-3">Expira às {new Date(draft.expires_at).toLocaleTimeString('pt-BR')}. O botão abaixo autoriza exatamente este texto nesta conversa.</p><p className="text-sm text-amber-100 mb-3">Peça para enviar por voz ou use o botão abaixo.</p><div className="flex flex-wrap gap-2"><button disabled={busy} onClick={() => authorize()} className={`${button} bg-[#4ff07f] text-[#00351b] font-semibold`}>Enviar agora</button><button disabled={busy} onClick={invalidateDraft} className={button}>Cancelar</button></div></div>}
         </div>}
       </section>
     </div>
