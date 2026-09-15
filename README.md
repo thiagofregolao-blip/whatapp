@@ -15,7 +15,7 @@ A conexão padrão agora usa **Baileys** diretamente com WhatsApp Web: não exig
 
 A sessão e as chaves Signal ficam criptografadas com AES-256-GCM no PostgreSQL. O segredo `BAILEYS_AUTH_KEY` fica no `.env`; mantenha-o estável e faça backup protegido. Se ausente, usa `JWT_SECRET` como chave de origem. Perder ou trocar o segredo exige reconectar. Não há arquivos de sessão públicos. Uma trava no PostgreSQL impede dois processos de controlar os sockets simultaneamente.
 
-Reconexão automática tem tentativas limitadas. Logout ou sessão inválida exigem novo QR; o app não envia mensagens durante a conexão. A sincronização inicial de histórico está desativada; grupos são sincronizados após conectar.
+Reconexão automática tem tentativas limitadas. Logout ou sessão inválida exigem novo QR; o app não envia mensagens durante a conexão. A sincronização inicial importa conversas e mensagens recebidas/enviadas disponibilizadas pelo WhatsApp. Uma sessão vinculada antes dessa mudança pode precisar de um novo QR para receber o histórico inicial; não há garantia de recuperar todo o histórico do celular.
 
 ## Executar
 
@@ -94,14 +94,14 @@ Cobertura: 8 testes unitários; autorização exata, expiração, usuário/conta
 - Unipile v1 permanece opcional com `WHATSAPP_PROVIDER=unipile`, `UNIPILE_BASE_URL`, `UNIPILE_API_KEY` e webhook autenticado por `X-Webhook-Secret`. O webhook é desativado no modo Baileys. `scripts/http-test.cjs` é um teste legado específico desse modo, com backend/banco descartáveis e sem chaves externas.
 - Os nomes legados `unipile_account_id` e `unipile_message_id` também guardam identificadores internos Baileys; o campo `provider` os diferencia. As migrações preservam dados antigos.
 - Mensagens/payloads são armazenados sem criptografia de campo; as credenciais da sessão, sim. Proteja banco/disco e backups. Consultas excluem mensagens expiradas; limpeza física e retenção de rascunhos precisam de rotina operacional.
-- Sem histórico antigo, push, PWA ou transcrição de áudio recebido nesta versão. Mensagens próprias, status/newsletters, eventos de sistema e conteúdo de visualização única são ignorados.
+- Histórico inicial conforme disponibilizado pelo WhatsApp; mensagens próprias são importadas. Status/newsletters, eventos de sistema e conteúdo de visualização única são ignorados. Sem push ou transcrição automática de áudios.
 - Telas antigas com mocks ficam arquivadas em `frontend/legacy-pages`, fora das rotas ativas.
 
 ## Luna e voz OpenAI
 
 O assistente ativo usa `gpt-5.6-luna` via Responses API. A conversa por voz usa `gpt-realtime-2.1-mini` por WebRTC e consulta a Luna para analisar mensagens. Configure `OPENAI_API_KEY` no backend (serviço `whatapp` no Railway). `OPENAI_MODEL` e `OPENAI_REALTIME_MODEL` permitem configurar os modelos. A chave nunca vai ao navegador. A assinatura de ChatGPT não substitui os créditos da API.
 
-Em `/assistant`, use **Ativar assistente por voz**. O áudio vai à OpenAI; as consultas enviam o recorte de mensagens à Luna. Encerrar voz, sair da página ou ocultar a aba libera o microfone. Cada chamada tem limite local de 10 minutos. Luna abre mensagens, prepara e envia respostas por ordem direta do usuário, sem código ou segunda confirmação. A ferramenta `enviar_resposta` usa rascunhos internos verificados por usuário, conta, conversa e texto, com proteção contra processamento duplicado. Mensagens recebidas não autorizam envio. Em Perfil, escolha entre avisos por chegada ou apenas consultar por voz (padrão). Áudios recebidos não são transcritos automaticamente.
+A voz inicia ao abrir o app autenticado e configurado, permanecendo disponível entre as abas internas. O navegador ainda pode exigir permissão de microfone e um toque para liberar áudio. Pausar voz ou ocultar o app libera o microfone; ao retornar, a chamada retoma se não foi pausada. Chamadas são renovadas após 55 minutos, quando o agente está ocioso. Luna envia por ordem direta do usuário, sem segunda confirmação, com proteção contra duplicação. Mensagens recebidas não autorizam envio. Avisos por chegada são opcionais; o padrão é consulta por voz. O PWA não promete microfone ativo em segundo plano no iOS.
 
 Sem a chave, a interface indica configuração pendente. O código Anthropic legado de digests não é usado pelo assistente ativo.
 
@@ -110,9 +110,9 @@ A caixa de entrada identifica mensagens novas a cada 5 segundos, sem anunciar o 
 Validação do fluxo: `npm --prefix frontend test` verifica deduplicação dos avisos e a frase de confirmação. No backend, `DATABASE_URL=<banco_descartavel_com_sufixo_test> npm run test:flow` testa sugestão autenticada, isolamento entre usuários e envio único com provedores simulados.
 
 
-## Nexo: conversas, perfil e relatórios
+## Conversas, perfil e relatórios
 
-- `/messages`: até 100 conversas, busca no recorte carregado, favoritas e leitura locais, thread de até 100 mensagens recebidas/respostas enviadas pelo Nexo. Não importa todo o histórico nem espelha envios externos ao app.
+- `/messages`: carregamento paginado de conversas sincronizadas, busca, favoritas e leitura locais; cada conversa exibe até 100 mensagens recebidas/enviadas disponíveis.
 - `/settings`: temas claro/escuro, avisos de voz e chave OpenAI pessoal ou acesso da plataforma.
 - Chaves pessoais verificadas nos endpoints de modelos, criptografadas com AES-256-GCM e vinculadas ao usuário. Configure `AI_KEYS_ENCRYPTION_KEY` (32+ caracteres) ou use `BAILEYS_AUTH_KEY`. Não troque a chave mestre sem migrar os valores criptografados. Rotas autenticadas retornam status, nunca a chave.
 - Gerações e voz usam a credencial da conta autenticada. Contas existentes na primeira migração mantêm o acesso de teste; novas contas não consomem a chave compartilhada. Selecionar plataforma não concede saldo.
@@ -121,3 +121,6 @@ Validação do fluxo: `npm --prefix frontend test` verifica deduplicação dos a
 - APK Android e áudio com tela bloqueada são próximas etapas. Esta entrega é web responsiva.
 
 Validação: 10 testes backend, 2 frontend, build completo, testes PostgreSQL de isolamento de chaves/conversas, relatório reutilizável e envio único. Interface conferida com fixtures em 390×844 e desktop. Nenhuma mensagem real enviada nos testes.
+
+### Login no PWA
+O atalho inicia em `/messages` e usa login próprio. E-mails são normalizados; o campo de senha permite conferir o preenchimento automático. Tokens expirados são renovados quando há refresh token válido. Credenciais incorretas continuam sendo recusadas. Railway usa confiança de um proxy por padrão; `TRUST_PROXY_HOPS` permite ajustar à topologia real.

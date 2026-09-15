@@ -52,3 +52,13 @@ async function sendToProvider(draft: any): Promise<any> {
   if (!response.ok) throw new Error('Falha no provedor')
   return response.json()
 }
+
+export async function createChatDraft(userId: string, chatId: string, content: string) {
+  const found = await db.query(`SELECT ws.id,ws.unipile_account_id,ws.provider,c.name FROM whatsapp_sessions ws
+    JOIN whatsapp_chats c ON c.user_id=ws.user_id AND c.account_id=ws.unipile_account_id
+    WHERE ws.user_id=$1 AND c.chat_id=$2 AND ws.status='connected'`, [userId,chatId])
+  const s = found.rows[0]
+  if (!s) throw new Error('Conversa indisponível na conta conectada')
+  return (await db.query(`INSERT INTO reply_drafts(user_id,session_id,account_id,chat_id,recipient,content,confirmation_token,provider)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[userId,s.id,s.unipile_account_id,chatId,s.name || chatId,content,crypto.randomBytes(32).toString('hex'),s.provider])).rows[0]
+}

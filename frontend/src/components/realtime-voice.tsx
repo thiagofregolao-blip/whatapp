@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
+import { Mic, MicOff } from 'lucide-react'
 import { api } from '@/lib/api'
 import { InboxMessage, ReviewDraft } from '@/lib/assistant-flow'
 
@@ -12,6 +13,14 @@ export default function RealtimeVoice(props: Props) {
   const announced = useRef(new Set<string>())
   const lastVoiceEvent = useRef(0)
   const [phase, setPhase] = useState<'idle' | 'connecting' | 'connected'>('idle')
+  const [paused, setPaused] = useState(false)
+  const pausedRef = useRef(false)
+  const [needsPermission, setNeedsPermission] = useState(false)
+  const [needsAudio, setNeedsAudio] = useState(false)
+  const retryTimer = useRef<ReturnType<typeof setTimeout>>()
+  const retries = useRef(0)
+  const startRef = useRef<() => Promise<void>>(async () => {})
+  startRef.current = start
   const [error, setError] = useState('')
   const [caption, setCaption] = useState('')
   const alertMode = useRef('manual')
@@ -28,20 +37,21 @@ export default function RealtimeVoice(props: Props) {
     if (player.current) { player.current.pause(); player.current.srcObject = null }
     setPhase('idle')
   }
+  useEffect(() => { if (configured && !paused && !document.hidden) { void startRef.current() } }, [configured,paused])
   useEffect(() => {
     let active = true
     const check = () => api('/api/assistant/status').then(s => { if (active) setConfigured(s.configured) }).catch(() => { if (active) setConfigured(null) })
     const readPreferences = () => { alertMode.current = localStorage.getItem('nexo-alerts') || 'manual' }
     readPreferences(); window.addEventListener('nexo-preferences', readPreferences)
     check(); const timer = setInterval(check, 30000)
-    const hide = () => { if (document.hidden) stop() }
+    const hide = () => { if (document.hidden) { clearTimeout(retryTimer.current); stop() } else if (!pausedRef.current) { void startRef.current() } }
     document.addEventListener('visibilitychange', hide)
-    return () => { active = false; window.removeEventListener('nexo-preferences', readPreferences); clearInterval(timer); document.removeEventListener('visibilitychange', hide); stop() }
+    return () => { active = false; clearTimeout(retryTimer.current); window.removeEventListener('nexo-preferences', readPreferences); clearInterval(timer); document.removeEventListener('visibilitychange', hide); stop() }
   }, [])
 
   async function start() {
-    if (resources.current) return
-    setError(''); setCaption(''); setPhase('connecting')
+    if (resources.current || pausedRef.current || configured !== true || document.hidden) return
+    setError(''); setNeedsPermission(false); setNeedsAudio(false); setCaption(''); setPhase('connecting')
     if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) { setError('Abra em HTTPS no Safari ou Chrome para usar o microfone.'); setPhase('idle'); return }
     const r = { pc: new RTCPeerConnection(), abort: new AbortController() } as VoiceResources
     resources.current = r
@@ -52,14 +62,16 @@ export default function RealtimeVoice(props: Props) {
       if (!current()) { r.stream.getTracks().forEach(t => t.stop()); return }
       r.stream.getTracks().forEach(track => r.pc.addTrack(track, r.stream!))
       r.pc.ontrack = event => {
-        if (current() && player.current) { player.current.srcObject = event.streams[0]; player.current.play().catch(() => setError('Toque no player abaixo para ouvir a voz.')) }
+        if (current() && player.current) { player.current.srcObject = event.streams[0]; player.current.play().catch(() => setNeedsAudio(true)) }
       }
       r.pc.onconnectionstatechange = () => {
         if (!current()) return
         if (r.pc.connectionState === 'connected') {
           clearTimeout(r.timer); setPhase('connected')
-          r.timer = setTimeout(() => { if (current()) { stop(); setCaption('Chamada encerrada após 10 minutos. Você pode iniciar outra.') } }, 600000)
-        } else if (['failed', 'disconnected', 'closed'].includes(r.pc.connectionState)) { stop(); setError('Conexão de voz encerrada. Toque para iniciar novamente.') }
+          retries.current = 0
+          const renew = () => { if (!current()) return; if (r.responding || r.speaking || r.pendingTools) { r.timer = setTimeout(renew,10000); return }; stop(); void startRef.current() }
+          r.timer = setTimeout(renew, 55 * 60000)
+        } else if (['failed', 'disconnected', 'closed'].includes(r.pc.connectionState)) { stop(); setError('Reconectando a voz…'); if (++retries.current <= 3) retryTimer.current = setTimeout(() => { void startRef.current() }, 3000 * retries.current) }
       }
       const channel = r.pc.createDataChannel('oai-events'); r.channel = channel
       const handled = new Set<string>()
@@ -99,7 +111,13 @@ export default function RealtimeVoice(props: Props) {
         }
         if (data.type === 'input_audio_buffer.speech_stopped') r.speaking = false
         if (data.type === 'response.output_audio_transcript.done') setCaption(data.transcript)
-        if (data.type === 'error') { stop(); setError('A OpenAI interrompeu a sessão de voz. Verifique a configuração e tente novamente.'); return }
+        if (data.type === 'error') {
+          const code = String(data.error?.code || 'unknown').replace(/[^a-zA-Z0-9_.-]/g,'_').slice(0,80)
+          void api('/api/assistant/diagnostics',{method:'POST',body:JSON.stringify({code})}).catch(() => {})
+          if (code === 'conversation_already_has_active_response') { r.responding=true; r.needsResponse=true; return }
+          if (code === 'response_cancel_not_active') return
+          stop(); setError(`Voz indisponível (${code}).`); return
+        }
         if (data.type !== 'response.function_call_arguments.done' || handled.has(data.call_id)) return
         handled.add(data.call_id)
         r.pendingTools = (r.pendingTools || 0) + 1
@@ -128,17 +146,15 @@ export default function RealtimeVoice(props: Props) {
       const offer = await r.pc.createOffer(); await r.pc.setLocalDescription(offer)
       const answer = await api('/api/assistant/realtime', { method: 'POST', signal: r.abort.signal, body: JSON.stringify({ sdp: offer.sdp }) })
       if (current()) await r.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp })
-    } catch (e: any) { if (current()) { stop(); setError(e.name === 'NotAllowedError' ? 'Permita o microfone para conversar por voz.' : e.message || 'Falha ao iniciar voz.') } }
+    } catch (e: any) { if (current()) { stop(); setNeedsPermission(e.name === 'NotAllowedError'); setError(e.name === 'NotAllowedError' ? 'O iPhone precisa da sua permissão para usar o microfone.' : e.message || 'Falha ao iniciar voz.') } }
   }
-  return <div className="rounded-2xl border border-emerald-400/30 bg-[var(--nx-panel)] p-4">
-    <h2 className="font-semibold">Luna · voz em tempo real</h2>
-    <p className="text-sm text-[var(--nx-muted)] mt-2">Pergunte o que chegou, ouça e responda sem digitar. Voz gerada por IA.</p>
-    {configured === false && <p role="status" className="text-amber-200 text-sm mt-2">Configure sua chave OpenAI em Perfil para ativar a Luna.</p>}
-    <p className="text-xs text-[var(--nx-muted)] my-3">Ao iniciar, seu microfone é enviado à OpenAI; consultas à Luna usam as mensagens do recorte selecionado. A API é cobrada por uso. Encerre quando terminar. Para enviar, basta pedir à Luna. Mantenha esta página aberta para os avisos por voz.</p>
-    <button disabled={configured === false && phase === 'idle'} onClick={phase === 'idle' ? start : stop} className="rounded-xl bg-[var(--nx-accent)] text-[var(--nx-bg)] px-4 py-3 font-semibold disabled:opacity-40">{phase === 'idle' ? 'Ativar assistente por voz' : phase === 'connecting' ? 'Cancelar conexão' : 'Encerrar voz'}</button>
-    <p role="status" className="text-sm mt-2">{phase === 'connected' ? 'Microfone ativo · pode falar e interromper a resposta' : phase === 'connecting' ? 'Conectando…' : ''}</p>
-    {error && <p role="alert" className="text-red-200 text-sm mt-2">{error}</p>}
-    {caption && <p aria-live="polite" className="text-sm text-[var(--nx-text)] mt-3 whitespace-pre-wrap">{caption}</p>}
-    <audio ref={player} autoPlay controls className={phase === 'idle' ? 'hidden' : 'w-full mt-3'} />
+  return <div className="luna-presence" role="region" aria-label="Luna por voz">
+    <span className={`voice-dot ${phase === 'connected' ? 'listening' : ''}`} /><span className="voice-state">{paused ? 'Luna pausada' : phase === 'connected' ? 'Luna está ouvindo' : phase === 'connecting' ? 'Luna está conectando…' : configured === false ? 'Configure a IA em Perfil' : 'Luna · voz'}</span>
+    <button className="icon-button" aria-label={paused ? 'Retomar microfone' : 'Pausar microfone'} onClick={() => { pausedRef.current=!paused; setPaused(!paused); if (!paused) { clearTimeout(retryTimer.current); stop() } }}>{paused ? <MicOff size={18} /> : <Mic size={18} />}</button>
+    {needsPermission && <button className="text-link" onClick={() => startRef.current()}>Permitir microfone</button>}
+    {needsAudio && <button className="text-link" onClick={() => { player.current?.play().then(() => setNeedsAudio(false)).catch(() => setError('O navegador bloqueou o áudio.')) }}>Liberar áudio</button>}
+    {error && <span className="voice-error" role="alert">{error}</span>}
+    {caption && <details className="voice-caption"><summary>Última resposta</summary><p>{caption}</p></details>}
+    <audio ref={player} autoPlay playsInline className="hidden" />
   </div>
 }

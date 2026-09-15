@@ -7,14 +7,14 @@ import { ApiResponse } from '../../types'
 const router = Router()
 
 const registerSchema = z.object({
-  email: z.string().email('Email inválido'),
+  email: z.string().trim().toLowerCase().email('Email inválido'),
   password: z.string().min(8, 'Senha deve ter ao menos 8 caracteres'),
   name: z.string().min(2).optional(),
   timezone: z.string().optional(),
 })
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
 })
 

@@ -13,9 +13,9 @@ let ownershipRetry: ReturnType<typeof setTimeout> | undefined
 const libPromise = () => import('@whiskeysockets/baileys')
 export const isBaileys = () => (process.env.WHATSAPP_PROVIDER || 'baileys') === 'baileys'
 
-export function normalizeIncoming(raw: any, account: string, lib: any): UnipileWebhookEvent | null {
+export function normalizeIncoming(raw: any, account: string, lib: any, includeOutgoing = false): UnipileWebhookEvent | null {
   const jid = raw.key?.remoteJid
-  if (!raw.key?.id || raw.key.fromMe || !jid || !/(@s\.whatsapp\.net|@g\.us|@lid)$/.test(jid)) return null
+  if (!raw.key?.id || (raw.key.fromMe && !includeOutgoing) || !jid || !/(@s\.whatsapp\.net|@g\.us|@lid)$/.test(jid)) return null
   // Do not persist view-once content or system/protocol events.
   if (raw.message?.viewOnceMessage || raw.message?.viewOnceMessageV2) return null
   const content = lib.normalizeMessageContent(raw.message)
@@ -27,7 +27,7 @@ export function normalizeIncoming(raw: any, account: string, lib: any): UnipileW
   if (!Number.isFinite(timestamp)) return null
   return { event: 'message_received', account_id: account, provider: 'baileys', provider_payload: JSON.parse(JSON.stringify(raw, lib.BufferJSON.replacer)), data: {
     id: `baileys:${crypto.createHash('sha256').update(`${account}:${jid}:${raw.key.id}`).digest('hex')}`,
-    chat_id: jid, is_group: jid.endsWith('@g.us'), from_me: false,
+    chat_id: jid, is_group: jid.endsWith('@g.us'), from_me: Boolean(raw.key.fromMe),
     sender: { id: raw.key.participant || jid, display_name: raw.pushName || undefined },
     text, timestamp, type: audio ? 'audio' : content.imageMessage ? 'image' : content.videoMessage ? 'video' : content.documentMessage ? 'document' : 'text',
     has_media: Boolean(audio || content.imageMessage || content.videoMessage || content.documentMessage),
@@ -47,7 +47,7 @@ async function startSocket(session: any, retries=0): Promise<any> {
   if (stopping) return
   const runtime: any = { session, open: false, socket: null, serial: Promise.resolve(), stopped: false, retry: null }
   runtimes.set(session.user_id, runtime)
-  const socket = lib.default({ auth: auth.state, logger, printQRInTerminal: false, markOnlineOnConnect: false, qrTimeout: 45000, syncFullHistory: false, shouldSyncHistoryMessage: () => false, connectTimeoutMs: 25000, defaultQueryTimeoutMs: 25000, generateHighQualityLinkPreview: false,
+  const socket = lib.default({ auth: auth.state, logger, printQRInTerminal: false, markOnlineOnConnect: false, qrTimeout: 45000, syncFullHistory: true, shouldSyncHistoryMessage: () => true, browser: lib.Browsers.macOS('Desktop'), connectTimeoutMs: 25000, defaultQueryTimeoutMs: 25000, generateHighQualityLinkPreview: false,
     getMessage: async () => undefined,
   })
   runtime.socket = socket
@@ -85,25 +85,48 @@ async function startSocket(session: any, retries=0): Promise<any> {
       }
     }).catch(() => fail('Erro na conexão. Tente conectar novamente.'))
   })
-  socket.ev.on('messages.upsert', ({ messages, type }: any) => {
-    // append includes messages queued by WhatsApp while this device was offline.
-    if (type !== 'notify' && type !== 'append') return
+  async function rememberChats(chats: any[]) {
+    for (const chat of chats) {
+      if (!chat.id || !/(@s\.whatsapp\.net|@g\.us|@lid)$/.test(chat.id)) continue
+      const timestamp = Number(chat.conversationTimestamp || 0)
+      await db.query(`INSERT INTO whatsapp_chats(user_id,account_id,chat_id,name,last_message_at) VALUES($1,$2,$3,$4,$5)
+        ON CONFLICT(user_id,account_id,chat_id) DO UPDATE SET name=COALESCE(EXCLUDED.name,whatsapp_chats.name),last_message_at=GREATEST(whatsapp_chats.last_message_at,EXCLUDED.last_message_at)`, [session.user_id,session.unipile_account_id,chat.id,chat.name || chat.subject || chat.notify || null,timestamp ? new Date(timestamp*1000) : null])
+    }
+  }
+  async function ingest(messages: any[], type: string) {
+    let accepted = 0, stored = 0
+    for (const raw of messages) {
+      if (runtime.stopped || stopping) return
+      const event = normalizeIncoming(raw, session.unipile_account_id, lib, true)
+      if (!event) continue
+      accepted++
+      const known = await db.query('SELECT name FROM whatsapp_chats WHERE user_id=$1 AND account_id=$2 AND chat_id=$3', [session.user_id,session.unipile_account_id,event.data.chat_id])
+      if (event.data.is_group) {
+        const group = await db.query('SELECT name FROM groups WHERE user_id=$1 AND whatsapp_chat_id=$2',[session.user_id,event.data.chat_id])
+        event.data.chat_name = known.rows[0]?.name || group.rows[0]?.name || event.data.chat_id
+      } else event.data.chat_name = known.rows[0]?.name || (!raw.key.fromMe && raw.pushName) || event.data.chat_id
+      await rememberChats([{id:event.data.chat_id,name:event.data.chat_name,conversationTimestamp:event.data.timestamp}])
+      if (await saveMessage(session.user_id,session.id,event,{includeOutgoing:true})) stored++
+    }
+    await db.query('UPDATE whatsapp_sessions SET last_activity_at=NOW() WHERE id=$1',[session.id])
+    console.info('[Baileys] Recebimento', { type, received: messages.length, accepted, stored })
+  }
+  function queue(task: () => Promise<void>) {
     runtime.serial = runtime.serial.then(async () => {
       if (runtime.stopped || stopping || runtimes.get(session.user_id) !== runtime) return
-      let accepted = 0, stored = 0
-      for (const raw of messages) {
-        const event = normalizeIncoming(raw, session.unipile_account_id,lib)
-        if (!event) continue
-        accepted++
-        if (event.data.is_group) {
-          const group = await db.query('SELECT name FROM groups WHERE user_id=$1 AND whatsapp_chat_id=$2',[session.user_id,event.data.chat_id])
-          event.data.chat_name = group.rows[0]?.name || event.data.chat_id
-        } else event.data.chat_name = raw.pushName || event.data.chat_id
-        if (await saveMessage(session.user_id,session.id,event)) stored++
-      }
-      await db.query('UPDATE whatsapp_sessions SET last_activity_at=NOW() WHERE id=$1',[session.id])
-      console.info('[Baileys] Recebimento', { type, received: messages.length, accepted, stored })
-    }).catch(() => fail('Falha ao guardar mensagens. Verifique o banco e reconecte.'))
+      await task()
+    }).catch(() => console.error('[Baileys] Falha ao persistir lote de sincronização'))
+  }
+  socket.ev.on('messaging-history.set', ({chats, contacts, messages, progress}: any) => queue(async () => {
+    await rememberChats(chats || [])
+    for (const c of contacts || []) if (c.id && (c.name || c.notify)) await db.query('UPDATE whatsapp_chats SET name=$4 WHERE user_id=$1 AND account_id=$2 AND chat_id=$3',[session.user_id,session.unipile_account_id,c.id,c.name || c.notify])
+    await ingest(messages || [], 'history')
+    console.info('[Baileys] Histórico sincronizado', { chats:chats?.length || 0, messages:messages?.length || 0, progress })
+  }))
+  socket.ev.on('chats.upsert', (chats: any[]) => queue(() => rememberChats(chats)))
+  socket.ev.on('chats.update', (chats: any[]) => queue(() => rememberChats(chats)))
+  socket.ev.on('messages.upsert', ({ messages, type }: any) => {
+    if (type === 'notify' || type === 'append') queue(() => ingest(messages,type))
   })
   return runtime
 }

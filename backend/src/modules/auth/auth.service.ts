@@ -14,7 +14,7 @@ const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '30d'
 export const register = async (dto: RegisterDto): Promise<AuthResponse> => {
   const existing = await db.query(
     'SELECT id FROM users WHERE email = $1',
-    [dto.email.toLowerCase()]
+    [dto.email.trim().toLowerCase()]
   )
 
   if (existing.rows.length > 0) {
@@ -28,7 +28,7 @@ export const register = async (dto: RegisterDto): Promise<AuthResponse> => {
      VALUES ($1, $2, $3, $4)
      RETURNING *`,
     [
-      dto.email.toLowerCase(),
+      dto.email.trim().toLowerCase(),
       password_hash,
       dto.name || null,
       dto.timezone || 'America/Sao_Paulo',
@@ -53,7 +53,7 @@ export const register = async (dto: RegisterDto): Promise<AuthResponse> => {
 export const login = async (dto: LoginDto): Promise<AuthResponse> => {
   const result = await db.query(
     'SELECT * FROM users WHERE email = $1 AND is_active = true',
-    [dto.email.toLowerCase()]
+    [dto.email.trim().toLowerCase()]
   )
 
   if (result.rows.length === 0) {

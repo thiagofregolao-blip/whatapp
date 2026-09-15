@@ -4,9 +4,11 @@ import "./globals.css";
 import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = {
-  title: "Nexo | Seu assistente pessoal",
+  appleWebApp: { capable:true, title:'Mensagens', statusBarStyle:'default' },
+  manifest:'/manifest.webmanifest',
+  title: "Assistente | Seu assistente pessoal",
   description:
-    "Leia, organize e responda suas conversas por voz com a Luna, sua assistente pessoal no Nexo.",
+    "Leia, organize e responda suas conversas por voz com a Luna, sua assistente pessoal no Assistente.",
 };
 
 export default function RootLayout({

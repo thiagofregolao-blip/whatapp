@@ -8,12 +8,13 @@ import { Message, UnipileWebhookEvent } from '../../types'
 export const saveMessage = async (
   userId: string,
   sessionId: string,
-  event: UnipileWebhookEvent
+  event: UnipileWebhookEvent,
+  options: { includeOutgoing?: boolean } = {}
 ): Promise<Message | null> => {
   const { data } = event
 
   // Ignorar mensagens enviadas pelo próprio usuário
-  if (data.from_me) return null
+  if (data.from_me && !options.includeOutgoing) return null
 
   // Dedup: verificar se mensagem já existe
   if (data.id) {
@@ -117,8 +118,8 @@ export const saveMessage = async (
        user_id, session_id, group_id, chat_id, chat_type, chat_name,
        sender_wa_id, sender_name, content, media_type, has_media, media_url,
        is_mention, is_reply, urgency_score, keyword_matched,
-       sent_at, expires_at, unipile_message_id, attachment_id, provider, source_account_id, provider_payload
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+       sent_at, expires_at, unipile_message_id, attachment_id, provider, source_account_id, provider_payload, from_me
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
      ON CONFLICT (unipile_message_id) DO NOTHING RETURNING *`,
     [
       userId,
@@ -144,6 +145,7 @@ export const saveMessage = async (
       event.provider || 'unipile',
       event.account_id,
       event.provider_payload ? JSON.stringify(event.provider_payload) : null,
+      Boolean(data.from_me),
     ]
   )
 

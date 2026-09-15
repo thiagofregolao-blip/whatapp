@@ -71,6 +71,20 @@ async function main() {
     assert.equal(foreignReports.data.length,0)
     await fetch(root+'/api/assistant/settings/key',{method:'DELETE',headers})
     assert.equal((await status()).configured,false,'Removing own key never falls back to platform')
+    const sentHistory = await saveMessage(owner,session,{event:'message_received',account_id:`fixture-${owner}`,data:{id:`sent-history-${owner}`,chat_id:'fixture-chat',from_me:true,text:'Mensagem enviada no telefone',timestamp:Date.now()/1000,type:'text'}},{includeOutgoing:true})
+    assert.ok(sentHistory)
+    const outgoing = (await db.query('SELECT from_me FROM messages WHERE id=$1',[sentHistory.id])).rows[0]
+    assert.equal(outgoing.from_me,true)
+    await db.query('INSERT INTO whatsapp_chats(user_id,account_id,chat_id,name) VALUES($1,$2,$3,$4)',[owner,`fixture-${owner}`,'empty-history-chat','Conversa sem mensagens'])
+    const allChats = await (await fetch(root+'/api/whatsapp/messages/conversations',{headers})).json()
+    assert.ok(allChats.data.some(c=>c.chat_id==='empty-history-chat'))
+    const bcrypt = require('bcryptjs')
+    await db.query('UPDATE users SET password_hash=$2 WHERE id=$1',[owner,await bcrypt.hash('fixture-login-password',4)])
+    const email = (await db.query('SELECT email FROM users WHERE id=$1',[owner])).rows[0].email
+    const authService = require('../dist/modules/auth/auth.service')
+    const logged = await authService.login({email:` ${email.toUpperCase()} `,password:'fixture-login-password'})
+    assert.ok(logged.access_token)
+    await assert.rejects(authService.login({email,password:'incorrect'}),/Credenciais/)
     console.log('PASS: personal key isolation/removal, encrypted storage, private conversations, cached daily report, send once; no real delivery')
   } finally {
     global.fetch=originalFetch

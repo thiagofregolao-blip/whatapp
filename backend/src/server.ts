@@ -17,6 +17,8 @@ import whatsappRoutes from './modules/whatsapp/whatsapp.routes'
 dotenv.config()
 
 const app = express()
+// Trust only the immediate reverse proxy, not arbitrary client-supplied chains.
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || (process.env.RAILWAY_ENVIRONMENT_ID ? '1' : '0')))
 const PORT = process.env.PORT || 3001
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) throw new Error('Configure JWT_SECRET com pelo menos 32 caracteres')
 

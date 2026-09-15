@@ -54,3 +54,12 @@ CREATE TABLE IF NOT EXISTS daily_reports (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(user_id, report_date)
 );
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS from_me BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS whatsapp_chats (
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  name TEXT,
+  last_message_at TIMESTAMPTZ,
+  PRIMARY KEY(user_id, account_id, chat_id)
+);

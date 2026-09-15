@@ -1,5 +1,6 @@
 // Em produção (servido pelo próprio Express), usa caminhos relativos.
 // Em dev, usa NEXT_PUBLIC_API_URL ou localhost:3000.
+let refreshing: Promise<void> | null = null;
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 export function getToken(): string | null {
@@ -7,7 +8,7 @@ export function getToken(): string | null {
   return localStorage.getItem('access_token');
 }
 
-export async function api(path: string, options: RequestInit = {}): Promise<any> {
+export async function api(path: string, options: RequestInit = {}, retried = false): Promise<any> {
   const token = getToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -21,8 +22,20 @@ export async function api(path: string, options: RequestInit = {}): Promise<any>
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
     headers,
+    cache: 'no-store',
+    signal: options.signal || AbortSignal.timeout(65000),
   });
 
+  if (res.status === 401 && !retried && !['/api/auth/login','/api/auth/register','/api/auth/refresh'].includes(path) && localStorage.getItem('refresh_token')) {
+    if (!refreshing) refreshing = (async () => {
+      const response = await fetch(`${API_URL}/api/auth/refresh`, { method: 'POST', headers: {'Content-Type':'application/json'}, cache:'no-store', signal:AbortSignal.timeout(15000), body:JSON.stringify({refresh_token:localStorage.getItem('refresh_token')}) });
+      const result = await response.json();
+      if (!response.ok || !result.data?.access_token) throw new Error('Sua sessão expirou. Entre novamente.');
+      localStorage.setItem('access_token',result.data.access_token);
+    })().finally(() => { refreshing=null });
+    await refreshing;
+    return api(path,options,true);
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || body.message || `Request failed with status ${res.status}`);
