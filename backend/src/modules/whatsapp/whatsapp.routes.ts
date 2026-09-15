@@ -49,6 +49,7 @@ router.get('/status', authenticate, safe(async (req: Request, res: Response) => 
     data: session
       ? {
           status: session.status,
+          connection_id: session.unipile_account_id,
           provider: (session as any).provider,
           qr_code: session.qr_code,
           qr_expires_at: session.qr_expires_at,

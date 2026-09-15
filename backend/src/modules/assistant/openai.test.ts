@@ -22,6 +22,8 @@ test('OpenAI: bounded read-only requests, response parsing and secret stays serv
     global.fetch = (async (_url: any, options: any) => {
       const session = JSON.parse(options.body.get('session'))
       assert.deepEqual(session.tools.map((t: any) => t.name), ['ler_conversa', 'buscar_contatos', 'enviar_mensagem', 'preparar_mensagem', 'consultar_luna', 'abrir_mensagem', 'preparar_resposta', 'enviar_resposta', 'cancelar_resposta', 'ouvir_audio'])
+      assert.equal(session.audio.input.turn_detection.create_response,false)
+      assert.equal(session.audio.input.turn_detection.interrupt_response,false)
       assert.equal(options.body.get('sdp'), 'v=0\r\nfixture')
       assert.ok(!JSON.stringify(session).includes('test-only-placeholder'))
       return new Response('v=0\r\nanswer')

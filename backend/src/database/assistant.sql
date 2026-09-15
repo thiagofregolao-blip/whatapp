@@ -79,3 +79,12 @@ ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS history_requested_at TIME
 ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS history_received_at TIMESTAMPTZ;
 ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS history_progress INTEGER;
 ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS history_error TEXT;
+CREATE TABLE IF NOT EXISTS app_diagnostics (
+ id BIGSERIAL PRIMARY KEY,
+ user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ event TEXT NOT NULL,
+ code TEXT NOT NULL DEFAULT '',
+ session_ref TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS app_diagnostics_user_time ON app_diagnostics(user_id,created_at DESC);

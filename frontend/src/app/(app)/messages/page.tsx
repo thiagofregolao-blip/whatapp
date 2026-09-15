@@ -30,6 +30,7 @@ export default function Conversations() {
   function persist(nextRead=read,nextFavorites=favorites){setRead(nextRead);setFavorites(nextFavorites);localStorage.setItem(store,JSON.stringify({read:nextRead,favorites:nextFavorites}))}
   useEffect(() => {const toggle=()=>setQuery(old=>old===null?'':null);window.addEventListener('luna-search',toggle);return()=>window.removeEventListener('luna-search',toggle)},[])
   useEffect(() => {
+    setRows([]);setActive(null);selectedId.current=null;setLoading(true)
     let alive=true,inflight=false,loaded=false
     async function refresh(){if(inflight)return;inflight=true;try{const data:Conversation[]=[];let batch:Conversation[];do{batch=await api(`/api/whatsapp/messages/conversations?offset=${data.length}`);data.push(...batch)}while(!loaded&&batch.length===100&&alive);if(alive){const first=!loaded;setRows(old=>first?data:[...data,...old.filter(c=>!data.some(n=>n.chat_id===c.chat_id))]);loaded=true}}catch(e:any){if(alive)setError(e.message)}finally{inflight=false;if(alive)setLoading(false)}}
     refresh();const timer=setInterval(refresh,5000)
@@ -37,7 +38,7 @@ export default function Conversations() {
     const draft=(e:Event)=>{const d=(e as CustomEvent).detail;setRows(old=>old.some(c=>c.chat_id===d.chat_id)?old.map(c=>c.chat_id===d.chat_id?{...c,draft_content:d.content}:c):[{id:null,chat_id:d.chat_id,chat_name:d.recipient,chat_type:'individual',draft_content:d.content},...old]);selectedId.current=d.chat_id;setActive({id:d.message_id||null,chat_id:d.chat_id,chat_name:d.recipient,chat_type:d.chat_id.endsWith('@g.us')?'group':'individual',draft_content:d.content});setReply(d.content);window.scrollTo(0,0)}
     window.addEventListener('luna-draft',draft);window.addEventListener('luna-sent',sent)
     return()=>{alive=false;clearInterval(timer);window.removeEventListener('luna-draft',draft);window.removeEventListener('luna-sent',sent)}
-  },[])
+  },[session?.connection_id,session?.history_received_at])
   const activeChatId=active?.chat_id
   useEffect(()=>{if(!activeChatId)return;let alive=true,inflight=false;setThreadLoading(true);async function refresh(){if(inflight)return;inflight=true;try{const data=await api(`/api/whatsapp/messages/conversations/${encodeURIComponent(activeChatId!)}`);if(alive)setEntries(data)}catch(e:any){if(alive)setError(e.message)}finally{inflight=false;if(alive)setThreadLoading(false)}}refresh();const timer=setInterval(refresh,5000);return()=>{alive=false;clearInterval(timer)}},[activeChatId])
   useEffect(()=>{bottom.current?.parentElement?.scrollTo({top:bottom.current.parentElement.scrollHeight})},[entries.length])

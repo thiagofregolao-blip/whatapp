@@ -9,3 +9,9 @@ export function isSendCommand(text: string) {
   return /^(?:luna[, ]+)?(?:por favor[, ]+)?(?:pode |poderia )?(?:envia|enviar|envie|manda|mandar|mande)(?:\b)/.test(value)
     && !/\b(nao|espera|aguarda|depois|se)\b/.test(value.split(/(?:dizendo|com o texto|mensagem:)/)[0])
 }
+
+export function takeVoiceTurn(seen: Set<string>, id: string | undefined, text: string, blocked: boolean): boolean {
+  if (!id || seen.has(id)) return false
+  seen.add(id)
+  return !blocked && Boolean(text.trim())
+}

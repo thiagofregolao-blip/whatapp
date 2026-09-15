@@ -1,3 +1,4 @@
+import { recordDiagnostic } from './diagnostics'
 import { Router, Request, Response, NextFunction } from 'express'
 import { z } from 'zod'
 import rateLimit from 'express-rate-limit'
@@ -147,9 +148,14 @@ assistantRouter.post('/reports', aiLimit, route(async (req, res) => {
 }))
 
 assistantRouter.use(['/chat', '/realtime', '/suggest'], aiLimit)
-assistantRouter.post('/diagnostics', aiLimit, route(async (req,res) => {
-  const { code } = z.object({code:z.string().regex(/^[a-zA-Z0-9_.-]{1,80}$/)}).strict().parse(req.body)
-  console.warn('[Luna] Evento de voz', {code})
+assistantRouter.get('/diagnostics', route(async (req,res) => {
+  const data=(await db.query('SELECT event,code,session_ref,created_at FROM app_diagnostics WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100',[req.user!.id])).rows
+  res.setHeader('Cache-Control','no-store');res.json({success:true,data})
+}))
+assistantRouter.post('/diagnostics', rateLimit({windowMs:60000,limit:30}), route(async (req,res) => {
+  const label=z.string().regex(/^[a-zA-Z0-9_.-]{1,80}$/)
+  const input=z.object({code:label.optional(),session:z.string().uuid().optional(),events:z.array(z.object({event:label,code:label.optional()}).strict()).max(20).optional()}).strict().parse(req.body)
+  for(const entry of input.events || (input.code?[{event:'voice.error',code:input.code}]:[])) await recordDiagnostic(req.user!.id,entry.event,entry.code || '',input.session || '')
   res.json({success:true,data:{recorded:true}})
 }))
 assistantRouter.post('/realtime' , route(async (req, res) => {

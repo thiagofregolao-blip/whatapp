@@ -1,3 +1,4 @@
+import { recordDiagnostic } from '../assistant/diagnostics'
 import { rememberContacts, directory } from './contacts'
 import crypto from 'crypto'
 import pino from 'pino'
@@ -48,23 +49,26 @@ async function startSocket(session: any, retries=0): Promise<any> {
   if (stopping) return
   const runtime: any = { session, open: false, socket: null, serial: Promise.resolve(), stopped: false, retry: null }
   runtimes.set(session.user_id, runtime)
-  const socket = lib.default({ auth: auth.state, logger, printQRInTerminal: false, markOnlineOnConnect: false, qrTimeout: 45000, syncFullHistory: true, shouldSyncHistoryMessage: () => true, browser: lib.Browsers.macOS('Desktop'), connectTimeoutMs: 25000, defaultQueryTimeoutMs: 25000, generateHighQualityLinkPreview: false,
+  const socket = lib.default({ auth: auth.state, logger, printQRInTerminal: false, markOnlineOnConnect: false, qrTimeout: 45000, syncFullHistory: true, shouldSyncHistoryMessage: () => true, browser: lib.Browsers.macOS('Chrome'), connectTimeoutMs: 25000, defaultQueryTimeoutMs: 25000, generateHighQualityLinkPreview: false,
     getMessage: async () => undefined,
   })
   runtime.socket = socket
   const updateDB = async (state: string, error: string | null = null) => db.query('UPDATE whatsapp_sessions SET status=$2,error_message=$3,qr_code=NULL,qr_expires_at=NULL WHERE id=$1 AND unipile_account_id=$4', [session.id,state,error,session.unipile_account_id])
   socket.ev.on('creds.update', () => { runtime.serial = runtime.serial.then(() => runtime.stopped ? undefined : auth.saveCreds()).catch(() => fail('Falha ao salvar a sessão; reconecte o WhatsApp.')) })
   function fail(message: string) {
+    void recordDiagnostic(session.user_id,'whatsapp.connection_failed').catch(()=>{})
     runtime.stopped = true; runtime.open = false; clearTimeout(runtime.retry); socket.end(new Error('Session stopped'))
     updateDB('error',message).catch(() => console.error('[Baileys] Falha na persistência da sessão'))
   }
   socket.ev.on('connection.update', (update: any) => {
     runtime.serial = runtime.serial.then(async () => {
       if (runtime.stopped || stopping || runtimes.get(session.user_id) !== runtime) return
+      if (update.qr) void recordDiagnostic(session.user_id,'whatsapp.qr_ready').catch(()=>{})
       if (update.qr) await db.query("UPDATE whatsapp_sessions SET status='connecting',qr_code=$2,qr_expires_at=NOW()+INTERVAL '40 seconds',error_message=NULL WHERE id=$1",[session.id,update.qr])
       if (update.connection === 'open') {
         runtime.open = true; retries = 0
         console.info('[Baileys] Conexão aberta')
+        void recordDiagnostic(session.user_id,'whatsapp.connected').catch(()=>{})
         await db.query("UPDATE whatsapp_sessions SET status='connected',display_name=$2,phone_number_encrypted=$3,connected_at=NOW(),qr_code=NULL,qr_expires_at=NULL,error_message=NULL WHERE id=$1",[session.id,socket.user?.name || null,lib.jidNormalizedUser(socket.user?.id || '')])
         if (!session.history_received_at && !session.history_requested_at) void requestHistory(session.user_id).catch(() => {})
         syncGroups(session.user_id).catch(() => console.warn('[Baileys] Grupos pendentes de sincronização'))
@@ -72,6 +76,7 @@ async function startSocket(session: any, retries=0): Promise<any> {
       if (update.connection === 'close') {
         runtime.open = false
         const code = update.lastDisconnect?.error?.output?.statusCode
+        void recordDiagnostic(session.user_id,'whatsapp.closed',String(code || 'unknown')).catch(()=>{})
         console.info('[Baileys] Conexão fechada', { code, retries })
         const loggedOut = code === lib.DisconnectReason.loggedOut || code === lib.DisconnectReason.badSession || code === lib.DisconnectReason.connectionReplaced
         if (loggedOut || retries >= 5 || (!auth.state.creds.registered && code !== lib.DisconnectReason.restartRequired)) {
@@ -148,13 +153,14 @@ export async function connect(userId: string) {
   const task = (async () => {
     let session = await sessionFor(userId)
     const running = runtimes.get(userId)
-    if (running && !running.stopped && !(session.qr_code && new Date(session.qr_expires_at).getTime() <= Date.now())) return session
+    if (running && !running.stopped && session.status !== 'disconnected' && session.status !== 'error' && !(session.qr_code && new Date(session.qr_expires_at).getTime() <= Date.now())) return session
     if (running) { running.stopped=true; clearTimeout(running.retry); running.socket.end(new Error('New connection')); await running.serial }
     const result = await db.query(`INSERT INTO whatsapp_sessions(user_id,unipile_account_id,status,provider) VALUES($1,$2,'connecting','baileys')
       ON CONFLICT(user_id) DO UPDATE SET unipile_account_id=$2,provider='baileys',status='connecting',qr_code=NULL,qr_expires_at=NULL,error_message=NULL,display_name=NULL,phone_number_encrypted=NULL,connected_at=NULL,history_requested_at=NULL,history_received_at=NULL,history_progress=NULL,history_error=NULL RETURNING *`,[userId,`baileys:${crypto.randomUUID()}`])
     session = result.rows[0]
     await db.query('DELETE FROM whatsapp_auth WHERE session_id=$1',[session.id])
-    try { await startSocket(session) } catch {
+    try { await startSocket(session) } catch (error: any) {
+      void recordDiagnostic(userId,'whatsapp.start_failed',String(error.code || error.name || 'unknown')).catch(()=>{})
       await db.query("UPDATE whatsapp_sessions SET status='error',error_message='Falha ao iniciar Baileys. Tente novamente.' WHERE id=$1",[session.id])
       throw new Error('Falha ao iniciar Baileys. Tente novamente.')
     }

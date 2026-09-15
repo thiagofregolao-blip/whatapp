@@ -1,0 +1,4 @@
+'use client'
+import {useEffect,useState} from 'react'
+import {api} from '@/lib/api'
+export default function Diagnostics(){const[logs,setLogs]=useState<any[]>([]),[error,setError]=useState('');async function refresh(){try{setLogs(await api('/api/assistant/diagnostics'));setError('')}catch(e:any){setError(e.message)}}useEffect(()=>{refresh();const timer=setInterval(refresh,5000);return()=>clearInterval(timer)},[]);return <main className="nexo-page max-w-2xl mx-auto"><h1 className="text-2xl font-semibold">Diagnóstico</h1><p className="muted my-4">Conexão e voz. Sem mensagens, áudios, senhas ou chaves.</p><button className="nexo-primary mb-5" onClick={refresh}>Atualizar</button>{error&&<p role="alert">{error}</p>}{logs.length?logs.map((l,i)=><div key={i} className="diagnostic-line">{new Date(l.created_at).toLocaleTimeString('pt-BR')} · {l.event}{l.code?` · ${l.code}`:''}</div>):<p>Nenhum evento registrado.</p>}</main>}

@@ -130,3 +130,10 @@ O atalho inicia em `/messages` e usa login próprio. E-mails são normalizados; 
 - Eventos de contatos salvam nome da agenda e aliases LID/telefone. Fotos são consultadas no WhatsApp autenticado, sob demanda, com cache de uma hora; fotos restritas ou ausentes usam iniciais.
 - Ao conectar uma sessão sem histórico, o backend solicita sincronização completa ao aparelho e mensagens anteriores das conversas com âncoras conhecidas. O pedido pode ser recusado pelo WhatsApp; a interface distingue pedido de recebimento. Um novo QR pode ser necessário. Nenhum total de mensagens do telefone é prometido.
 - A lista mostra rascunhos reais e permite iniciar conversa pelo botão de nova mensagem. O atalho de voz usa nomes, sem expor IDs internos.
+
+### Conectar pela web e usar no PWA
+Abra `/connect` no computador, entre com a mesma conta usada no PWA e escaneie pelo WhatsApp → Dispositivos conectados. Essa página é independente do layout do assistente e não inicia microfone ou chamada de voz. A conexão vive no servidor; o PWA observa o mesmo `connection_id` e recarrega as conversas quando a sessão ou o histórico mudam.
+
+O handshake usa `Browsers.macOS('Chrome')` com histórico habilitado. A identificação Desktop foi reproduzida encerrando o handshake com 428; o teste `scripts/qr-flow-test.cjs`, em banco `_test`, confirma QR persistido e estado compartilhado, sem vincular telefone ou enviar mensagens.
+
+A voz responde após uma transcrição não vazia, no máximo uma vez por item de entrada. VAD não cria respostas automaticamente. Durante a reprodução da voz, o envio do microfone fica suspenso e retoma após 450 ms, descartando capturas marcadas como eco. Conflitos de resposta ativa não enfileiram respostas adicionais. `/diagnostics` e o painel em `/connect` mostram até 100 eventos técnicos; o armazenamento mantém até 200 por usuário, sem texto, áudio, contatos, QR, SDP ou credenciais.
