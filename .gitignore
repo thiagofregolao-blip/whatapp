@@ -12,3 +12,8 @@ out/
 .local/
 
 skill-observations/
+
+# WhatsApp session credentials must never be published
+auth_info*/
+baileys_auth*/
+*.session

@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express'
 import { verifyWebhook, normalizeWebhook } from './webhook'
 import { authenticate } from '../../middleware/auth'
+import * as baileys from './baileys.service'
 import * as unipileService from './unipile.service'
 import { saveMessage } from '../messages/messages.service'
 import { UnipileWebhookEvent, ApiResponse } from '../../types'
@@ -15,8 +16,9 @@ const safe = (fn: (req: Request, res: Response) => Promise<any>) => (req: Reques
 // ============================================
 router.post('/connect', authenticate, async (req: Request, res: Response) => {
   try {
-    const result = await unipileService.initiateConnection(req.user!.id)
-    res.json({ success: true, data: result } as ApiResponse)
+    const result: any = baileys.isBaileys() ? await baileys.connect(req.user!.id) : await unipileService.initiateConnection(req.user!.id)
+    const data = baileys.isBaileys() ? { session_id: result.id, status: result.status, qr_code: result.qr_code, qr_expires_at: result.qr_expires_at, provider: 'baileys' } : result
+    res.json({ success: true, data } as ApiResponse)
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message })
   }
@@ -27,11 +29,16 @@ router.post('/connect', authenticate, async (req: Request, res: Response) => {
 // ============================================
 router.get('/status', authenticate, safe(async (req: Request, res: Response) => {
   const session = await unipileService.getSessionStatus(req.user!.id)
+  res.setHeader('Cache-Control','no-store')
   res.json({
     success: true,
     data: session
       ? {
           status: session.status,
+          provider: (session as any).provider,
+          qr_code: session.qr_code,
+          qr_expires_at: session.qr_expires_at,
+          error_message: session.error_message,
           display_name: session.display_name,
           connected_at: session.connected_at,
           last_activity_at: session.last_activity_at,
@@ -45,7 +52,8 @@ router.get('/status', authenticate, safe(async (req: Request, res: Response) => 
 // ============================================
 router.delete('/disconnect', authenticate, async (req: Request, res: Response) => {
   try {
-    await unipileService.disconnect(req.user!.id)
+    if (baileys.isBaileys()) await baileys.disconnect(req.user!.id)
+    else await unipileService.disconnect(req.user!.id)
     res.json({ success: true, message: 'WhatsApp desconectado' })
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message })
@@ -85,7 +93,8 @@ router.post('/sync', authenticate, async (req: Request, res: Response) => {
     if (!session?.unipile_account_id || session.status !== 'connected') {
       return res.status(400).json({ success: false, error: 'WhatsApp não conectado' })
     }
-    await unipileService.syncGroups(req.user!.id, session.unipile_account_id)
+    if (baileys.isBaileys()) await baileys.syncGroups(req.user!.id)
+    else await unipileService.syncGroups(req.user!.id, session.unipile_account_id)
     res.json({ success: true, message: 'Grupos sincronizados' })
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message })
@@ -104,6 +113,7 @@ router.get('/qr-stream', handleQRStream)
 // ============================================
 router.post('/webhook', async (req: Request, res: Response) => {
   try {
+    if (baileys.isBaileys()) return res.status(404).json({ error: 'Webhook Unipile desativado' })
     const raw = req.body as Buffer
     if (!verifyWebhook(raw, req.headers['x-unipile-signature'] as string, req.headers['x-webhook-secret'] as string)) {
       return res.status(401).json({ error: 'Webhook não autorizado' })

@@ -17,3 +17,15 @@ CREATE TABLE IF NOT EXISTS reply_drafts (
 );
 CREATE INDEX IF NOT EXISTS idx_reply_drafts_user ON reply_drafts(user_id, created_at DESC);
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_id TEXT;
+
+ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'unipile';
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'unipile';
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS source_account_id TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS provider_payload JSONB;
+ALTER TABLE reply_drafts ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'unipile';
+CREATE TABLE IF NOT EXISTS whatsapp_auth (
+  session_id UUID REFERENCES whatsapp_sessions(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  encrypted_value TEXT NOT NULL,
+  PRIMARY KEY (session_id, key)
+);

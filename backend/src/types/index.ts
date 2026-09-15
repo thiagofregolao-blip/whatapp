@@ -190,6 +190,8 @@ export interface DigestContentJson {
 // ============================================
 
 export interface UnipileWebhookEvent {
+  provider?: string
+  provider_payload?: unknown
   event: string
   account_id: string
   data: {

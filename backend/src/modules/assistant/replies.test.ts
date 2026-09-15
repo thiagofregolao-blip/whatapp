@@ -42,3 +42,33 @@ test('connection progress does not masquerade as disconnection', () => {
   for (const message of ['OK','SYNC_SUCCESS','RECONNECTED']) assert.equal(normalizeWebhook({AccountStatus:{account_id:'a',message}}).event,'account_connected')
   assert.equal(normalizeWebhook({AccountStatus:{account_id:'a',message:'CREDENTIALS'}}).event,'account_disconnected')
 })
+
+import { seal, unseal } from '../whatsapp/baileys-auth'
+import { normalizeIncoming, assertLiveAccount } from '../whatsapp/baileys.service'
+test('Baileys credentials are encrypted and tampering fails closed', () => {
+  process.env.BAILEYS_AUTH_KEY='test-key-only-012345678901234567890123456789'
+  const encrypted=seal('private session keys')
+  assert.equal(unseal(encrypted),'private session keys')
+  assert.ok(!encrypted.includes('private session keys'))
+  const bytes=Buffer.from(encrypted,'base64');bytes[30]^=1
+  assert.throws(()=>unseal(bytes.toString('base64')))
+})
+test('Baileys receives groups and wrapped audio without ingesting own/system messages', async () => {
+  const lib=await import('@whiskeysockets/baileys')
+  const raw={key:{id:'a',remoteJid:'123@g.us',participant:'456@s.whatsapp.net',fromMe:false},pushName:'Pessoa',messageTimestamp:1700000000,message:{ephemeralMessage:{message:{audioMessage:{mimetype:'audio/ogg',url:'https://example.invalid/audio',mediaKey:Buffer.from('test')}}}}}
+  const result=normalizeIncoming(raw,'account-one',lib)!
+  assert.equal(result.data.type,'audio');assert.equal(result.data.is_group,true);assert.equal(result.data.chat_id,'123@g.us')
+  assert.notEqual(result.data.id,normalizeIncoming(raw,'account-two',lib)!.data.id)
+  assert.equal(normalizeIncoming({...raw,key:{...raw.key,fromMe:true}},'account-one',lib),null)
+  assert.equal(normalizeIncoming({...raw,key:{...raw.key,remoteJid:'status@broadcast'}},'account-one',lib),null)
+  assert.equal(normalizeIncoming({...raw,message:{protocolMessage:{}}},'account-one',lib),null)
+  assert.equal(normalizeIncoming({...raw,message:{viewOnceMessage:{message:{audioMessage:{}}}}},'account-one',lib),null)
+})
+test('Baileys sender requires exact live owner, session, account and supported recipient', () => {
+  const d={user_id:'owner',session_id:'session',account_id:'account',chat_id:'123@g.us'}
+  const r={open:true,stopped:false,session:{user_id:'owner',id:'session',unipile_account_id:'account'}}
+  assert.doesNotThrow(()=>assertLiveAccount(d,r))
+  for(const patch of [{user_id:'other'},{session_id:'other'},{account_id:'other'},{chat_id:'status@broadcast'}])assert.throws(()=>assertLiveAccount({...d,...patch},r))
+  assert.throws(()=>assertLiveAccount(d,{...r,open:false}))
+  assert.throws(()=>assertLiveAccount(d,{...r,stopped:true}))
+})

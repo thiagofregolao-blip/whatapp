@@ -3,6 +3,7 @@ import { z } from 'zod'
 import Anthropic from '@anthropic-ai/sdk'
 import { db } from '../../database/connection'
 import { authenticate } from '../../middleware/auth'
+import { audioOriginal } from '../whatsapp/baileys.service'
 import { createDraft, sendDraft } from './replies'
 
 export const assistantRouter = Router()
@@ -23,6 +24,14 @@ messagesRouter.get('/:id/audio', route(async (req, res) => {
   const id = z.string().uuid().parse(req.params.id)
   const found = await db.query(`SELECT m.*, ws.unipile_account_id FROM messages m JOIN whatsapp_sessions ws ON ws.id=m.session_id WHERE m.id=$1 AND m.user_id=$2 AND m.media_type='audio' AND (m.expires_at IS NULL OR m.expires_at > NOW()) AND ws.status='connected'`, [id, req.user!.id])
   const m = found.rows[0]
+  if (m?.provider === 'baileys') {
+    try {
+      const audio = await audioOriginal(m)
+      res.setHeader('Content-Type',audio.type)
+      res.setHeader('Cache-Control','no-store')
+      return res.send(audio.bytes)
+    } catch (e: any) { return res.status(502).json({error:e.message}) }
+  }
   if (!m?.attachment_id || !m.unipile_message_id) return res.status(404).json({ error: 'Áudio original indisponível no provedor' })
   if (!process.env.UNIPILE_API_KEY || !process.env.UNIPILE_BASE_URL) return res.status(503).json({ error: 'Unipile não configurado' })
   const upstream = await fetch(`${process.env.UNIPILE_BASE_URL}/api/v1/messages/${encodeURIComponent(m.unipile_message_id)}/attachments/${encodeURIComponent(m.attachment_id)}?account_id=${encodeURIComponent(m.unipile_account_id)}`, { headers: { 'X-API-KEY': process.env.UNIPILE_API_KEY }, signal: AbortSignal.timeout(30000), redirect: 'error' })

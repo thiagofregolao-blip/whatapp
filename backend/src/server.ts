@@ -5,6 +5,7 @@ import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
 import dotenv from 'dotenv'
 
+import { restore, shutdown, isBaileys } from './modules/whatsapp/baileys.service'
 import { testConnection } from './database/connection'
 
 
@@ -75,6 +76,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // ============================================
 const start = async () => {
   await testConnection()
+  if (isBaileys()) await restore()
   // No background sending or scheduled jobs in the personal assistant.
 
   app.listen(Number(PORT), process.env.HOST || '127.0.0.1', () => {
@@ -82,6 +84,8 @@ const start = async () => {
   })
 }
 
-start().catch(console.error)
+process.on('SIGTERM', () => { shutdown(); process.exit(0) })
+process.on('SIGINT', () => { shutdown(); process.exit(0) })
+start().catch(err => { console.error(err.message); process.exit(1) })
 
 export default app
