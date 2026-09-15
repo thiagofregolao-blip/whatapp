@@ -63,12 +63,14 @@ async function startSocket(session: any, retries=0): Promise<any> {
       if (update.qr) await db.query("UPDATE whatsapp_sessions SET status='connecting',qr_code=$2,qr_expires_at=NOW()+INTERVAL '40 seconds',error_message=NULL WHERE id=$1",[session.id,update.qr])
       if (update.connection === 'open') {
         runtime.open = true; retries = 0
+        console.info('[Baileys] Conexão aberta')
         await db.query("UPDATE whatsapp_sessions SET status='connected',display_name=$2,phone_number_encrypted=$3,connected_at=NOW(),qr_code=NULL,qr_expires_at=NULL,error_message=NULL WHERE id=$1",[session.id,socket.user?.name || null,lib.jidNormalizedUser(socket.user?.id || '')])
         syncGroups(session.user_id).catch(() => console.warn('[Baileys] Grupos pendentes de sincronização'))
       }
       if (update.connection === 'close') {
         runtime.open = false
         const code = update.lastDisconnect?.error?.output?.statusCode
+        console.info('[Baileys] Conexão fechada', { code, retries })
         const loggedOut = code === lib.DisconnectReason.loggedOut || code === lib.DisconnectReason.badSession || code === lib.DisconnectReason.connectionReplaced
         if (loggedOut || retries >= 5 || (!auth.state.creds.registered && code !== lib.DisconnectReason.restartRequired)) {
           runtime.stopped = true
@@ -84,19 +86,23 @@ async function startSocket(session: any, retries=0): Promise<any> {
     }).catch(() => fail('Erro na conexão. Tente conectar novamente.'))
   })
   socket.ev.on('messages.upsert', ({ messages, type }: any) => {
-    if (type !== 'notify') return
+    // append includes messages queued by WhatsApp while this device was offline.
+    if (type !== 'notify' && type !== 'append') return
     runtime.serial = runtime.serial.then(async () => {
-      if (runtime.stopped || !runtime.open) return
+      if (runtime.stopped || stopping || runtimes.get(session.user_id) !== runtime) return
+      let accepted = 0, stored = 0
       for (const raw of messages) {
         const event = normalizeIncoming(raw, session.unipile_account_id,lib)
         if (!event) continue
+        accepted++
         if (event.data.is_group) {
           const group = await db.query('SELECT name FROM groups WHERE user_id=$1 AND whatsapp_chat_id=$2',[session.user_id,event.data.chat_id])
           event.data.chat_name = group.rows[0]?.name || event.data.chat_id
         } else event.data.chat_name = raw.pushName || event.data.chat_id
-        await saveMessage(session.user_id,session.id,event)
+        if (await saveMessage(session.user_id,session.id,event)) stored++
       }
       await db.query('UPDATE whatsapp_sessions SET last_activity_at=NOW() WHERE id=$1',[session.id])
+      console.info('[Baileys] Recebimento', { type, received: messages.length, accepted, stored })
     }).catch(() => fail('Falha ao guardar mensagens. Verifique o banco e reconecte.'))
   })
   return runtime

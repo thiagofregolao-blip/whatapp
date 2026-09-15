@@ -33,7 +33,7 @@ export default function Assistant() {
     catch (e: any) { setError(e.message) }
     finally { setLoading(false) }
   }, [])
-  useEffect(() => { refresh(); const timer = setInterval(refresh, 30000); return () => clearInterval(timer) }, [refresh])
+  useEffect(() => { refresh(); const timer = setInterval(refresh, 5000); return () => clearInterval(timer) }, [refresh])
   useEffect(() => { setVoiceSupported(Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)); return () => recognition.current?.abort() }, [])
   useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl) }, [audioUrl])
 
@@ -95,7 +95,7 @@ export default function Assistant() {
     {error && <p role="alert" className="rounded-xl bg-red-950 p-4 text-red-100 mb-4">{error}</p>}
     {notice && <p role="status" className="rounded-xl bg-emerald-950 p-4 mb-4">{notice}</p>}
     <div className="grid lg:grid-cols-[340px_1fr] gap-5">
-      <section className="rounded-2xl bg-[#131b2e] border border-white/10 p-4"><div className="flex justify-between items-center"><h2 className="font-semibold">Caixa de entrada</h2><button className={button} onClick={refresh}>Atualizar</button></div><p className="text-xs text-slate-400 mt-2 mb-4">Últimas 80 mensagens recebidas · atualização a cada 30 s</p>
+      <section className="rounded-2xl bg-[#131b2e] border border-white/10 p-4"><div className="flex justify-between items-center"><h2 className="font-semibold">Caixa de entrada</h2><button className={button} onClick={refresh}>Atualizar</button></div><p className="text-xs text-slate-400 mt-2 mb-4">Últimas 80 mensagens recebidas · atualização a cada 5 s</p>
         {loading ? <p>Carregando mensagens…</p> : !messages.length ? <p className="text-slate-400 py-8">Nenhuma mensagem recebida ainda. Novas mensagens aparecerão aqui após a conexão.</p> : <div className="space-y-2 max-h-[420px] lg:max-h-[680px] overflow-y-auto">{messages.map(m => <button key={m.id} onClick={() => { setSelected(m); setDraft(null); setReply('') }} className={`w-full text-left rounded-xl p-3 border ${selected?.id === m.id ? 'border-[#4ff07f] bg-emerald-950/40' : 'border-white/5 bg-white/[.02]'}`}><div className="flex justify-between gap-2"><strong className="text-sm break-words">{m.chat_name || m.sender_name || m.chat_id}</strong>{m.urgency_score >= 4 && <span className="text-xs text-amber-300">Atenção</span>}</div><p className="text-xs text-slate-400 mt-1">{m.sender_name || 'Contato'} · {new Date(m.sent_at).toLocaleString('pt-BR')}</p><p className="text-sm mt-2 line-clamp-2 break-words">{m.media_type === 'audio' ? '▶ Mensagem de áudio' : m.content || 'Anexo recebido'}</p></button>)}</div>}
       </section>
       <section className="space-y-4 min-w-0">
