@@ -4,9 +4,9 @@ import "./globals.css";
 import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = {
-  title: "Leitor de WhatsApp | Assistente pessoal",
+  title: "Nexo | Seu assistente pessoal",
   description:
-    "Assistente pessoal de WhatsApp que monitora grupos e conversas e entrega resumos inteligentes gerados por IA.",
+    "Leia, organize e responda suas conversas por voz com a Luna, sua assistente pessoal no Nexo.",
 };
 
 export default function RootLayout({

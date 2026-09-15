@@ -72,7 +72,7 @@ O ditado preenche os campos para revisão. Depende do suporte/permissão do nave
 
 Selecione uma mensagem → escreva/dite/cole uma resposta → **Revisar rascunho** → confira conversa e texto → **Autorizar e enviar agora**. Em grupos, o destinatário é o grupo inteiro.
 
-A autorização dura 10 minutos e vincula usuário, sessão, provedor, conta, conversa e texto exatos. Uma mensagem de uma conta anterior não pode originar rascunho para outra conta. Alterar texto ou destinatário exige nova revisão.
+A autorização dura 10 minutos e vincula usuário, sessão, provedor, conta, conversa e texto exatos. Uma mensagem de uma conta anterior não pode originar rascunho para outra conta. Alterar texto ou destinatário cria outro rascunho interno.
 
 O banco reivindica o rascunho antes de chamar o provedor. Dois cliques simultâneos geram no máximo uma chamada. Timeout/resultado incerto mantém `unknown` (ou `sending` após interrupção), sem repetição automática. Confira o WhatsApp antes de criar outro rascunho. A IA não tem ferramenta de envio. Entregas automáticas antigas por WhatsApp/e-mail foram removidas.
 
@@ -101,10 +101,23 @@ Cobertura: 8 testes unitários; autorização exata, expiração, usuário/conta
 
 O assistente ativo usa `gpt-5.6-luna` via Responses API. A conversa por voz usa `gpt-realtime-2.1-mini` por WebRTC e consulta a Luna para analisar mensagens. Configure `OPENAI_API_KEY` no backend (serviço `whatapp` no Railway). `OPENAI_MODEL` e `OPENAI_REALTIME_MODEL` permitem configurar os modelos. A chave nunca vai ao navegador. A assinatura de ChatGPT não substitui os créditos da API.
 
-Em `/assistant`, use **Conversar por voz**, permita o microfone e fale. O áudio do microfone vai à OpenAI; as consultas enviam o recorte de mensagens à Luna. **Encerrar voz**, sair da página ou ocultar a aba encerra a conexão e libera o microfone. Cada chamada tem limite local de 10 minutos. Luna pode abrir mensagens e preencher rascunhos na tela. Novas mensagens geram avisos durante a chamada ativa. A confirmação acontece pelo botão ou pela frase exata `confirmo envio` seguida dos quatro dígitos exibidos no rascunho, pronunciada após a leitura da revisão. A transcrição é verificada pelo aplicativo: mensagens recebidas, ferramentas do modelo, um sim isolado, códigos antigos e rascunhos alterados não autorizam envio. Não há ferramenta de envio acessível ao modelo. Áudios recebidos do WhatsApp continuam disponíveis como original, sem transcrição automática.
+Em `/assistant`, use **Ativar assistente por voz**. O áudio vai à OpenAI; as consultas enviam o recorte de mensagens à Luna. Encerrar voz, sair da página ou ocultar a aba libera o microfone. Cada chamada tem limite local de 10 minutos. Luna abre mensagens, prepara e envia respostas por ordem direta do usuário, sem código ou segunda confirmação. A ferramenta `enviar_resposta` usa rascunhos internos verificados por usuário, conta, conversa e texto, com proteção contra processamento duplicado. Mensagens recebidas não autorizam envio. Em Perfil, escolha entre avisos por chegada ou apenas consultar por voz (padrão). Áudios recebidos não são transcritos automaticamente.
 
 Sem a chave, a interface indica configuração pendente. O código Anthropic legado de digests não é usado pelo assistente ativo.
 
 A caixa de entrada identifica mensagens novas a cada 5 segundos, sem anunciar o histórico inicial. O aviso pergunta se deseja saber o conteúdo. **Ler mensagem** seleciona a conversa; **Preparar resposta** e **Sugerir resposta** preenchem o campo e abrem a revisão. Editar, cancelar ou mudar de conversa invalida a confirmação anterior. Avisos por voz exigem a página visível e chamada ativa; não há notificação de voz com o app fechado.
 
 Validação do fluxo: `npm --prefix frontend test` verifica deduplicação dos avisos e a frase de confirmação. No backend, `DATABASE_URL=<banco_descartavel_com_sufixo_test> npm run test:flow` testa sugestão autenticada, isolamento entre usuários e envio único com provedores simulados.
+
+
+## Nexo: conversas, perfil e relatórios
+
+- `/messages`: até 100 conversas, busca no recorte carregado, favoritas e leitura locais, thread de até 100 mensagens recebidas/respostas enviadas pelo Nexo. Não importa todo o histórico nem espelha envios externos ao app.
+- `/settings`: temas claro/escuro, avisos de voz e chave OpenAI pessoal ou acesso da plataforma.
+- Chaves pessoais verificadas nos endpoints de modelos, criptografadas com AES-256-GCM e vinculadas ao usuário. Configure `AI_KEYS_ENCRYPTION_KEY` (32+ caracteres) ou use `BAILEYS_AUTH_KEY`. Não troque a chave mestre sem migrar os valores criptografados. Rotas autenticadas retornam status, nunca a chave.
+- Gerações e voz usam a credencial da conta autenticada. Contas existentes na primeira migração mantêm o acesso de teste; novas contas não consomem a chave compartilhada. Selecionar plataforma não concede saldo.
+- `/reports`: relatório manual salvo por data, até 300 mensagens no fuso da conta. Trava transacional evita gerações simultâneas duplicadas. Sem envio agendado por WhatsApp/email.
+- Assinatura de R$ 9,90 e créditos em preparação, sem checkout nem medição de saldo. Veja [proposta](docs/plano-nexo.md).
+- APK Android e áudio com tela bloqueada são próximas etapas. Esta entrega é web responsiva.
+
+Validação: 10 testes backend, 2 frontend, build completo, testes PostgreSQL de isolamento de chaves/conversas, relatório reutilizável e envio único. Interface conferida com fixtures em 390×844 e desktop. Nenhuma mensagem real enviada nos testes.

@@ -1,9 +1,10 @@
 // Disposable DB. OpenAI and delivery are simulated; no real messages are sent.
 process.env.JWT_SECRET = 'test-only-secret-at-least-thirty-two-characters'
 process.env.OPENAI_API_KEY = 'test-only-placeholder'
+process.env.AI_KEYS_ENCRYPTION_KEY = 'fixture-master-secret-at-least-32-characters'
 const assert = require('node:assert/strict'), express = require('express'), jwt = require('jsonwebtoken')
 const { db } = require('../dist/database/connection')
-const { assistantRouter } = require('../dist/modules/assistant/assistant.routes')
+const { assistantRouter, messagesRouter } = require('../dist/modules/assistant/assistant.routes')
 const { sendDraft } = require('../dist/modules/assistant/replies')
 const { saveMessage } = require('../dist/modules/messages/messages.service')
 async function main() {
@@ -17,20 +18,33 @@ async function main() {
     const message = await saveMessage(owner,session,{event:'message_received',account_id:`fixture-${owner}`,data:{id:`flow-${owner}`,chat_id:'fixture-chat',from_me:false,text:'Pode confirmar o recebimento?',timestamp:Date.now()/1000,type:'text',sender:{id:'fixture',display_name:'Contato teste'}}})
     global.fetch = async (url, options) => {
       if (String(url).startsWith('http://127.0.0.1:')) return originalFetch(url,options)
+      if (String(url).startsWith('https://api.openai.com/v1/models/')) return new Response('{}')
       assert.equal(url,'https://api.openai.com/v1/responses')
+      assert.equal(options.headers.Authorization, 'Bearer sk-fixture-personal-key-at-least-20')
       const request = JSON.parse(options.body)
       assert.equal(request.tools,undefined)
       assert.equal(JSON.parse(request.input).received_messages[0].id,message.id)
       modelCalls++
       return new Response(JSON.stringify({status:'completed',output:[{type:'message',content:[{type:'output_text',text:'Recebi, obrigado!'}]}]}))
     }
-    const app = express(); app.use(express.json()); app.use('/api/assistant',assistantRouter)
+    const app = express(); app.use(express.json()); app.use('/api/assistant',assistantRouter); app.use('/api/whatsapp/messages',messagesRouter)
     server = await new Promise(resolve => { const s=app.listen(0,'127.0.0.1',()=>resolve(s)) })
     const endpoint = `http://127.0.0.1:${server.address().port}/api/assistant/suggest`
     const query = token => fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json', ...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify({message_id:message.id,instruction:'Confirme que recebi'})})
     assert.equal((await query()).status,401)
     assert.equal((await query(jwt.sign({sub:other},process.env.JWT_SECRET))).status,404)
     assert.equal(modelCalls,0,'Unowned messages never reach OpenAI')
+    const root = endpoint.replace('/api/assistant/suggest','')
+    const headers = { 'Content-Type':'application/json', Authorization:`Bearer ${jwt.sign({sub:owner},process.env.JWT_SECRET)}` }
+    const status = async (tokenHeaders=headers) => (await (await fetch(root+'/api/assistant/status',{headers:tokenHeaders})).json()).data
+    assert.equal((await status()).configured,false,'New users cannot consume global API key')
+    const saved = await fetch(root+'/api/assistant/settings',{method:'PUT',headers,body:JSON.stringify({mode:'personal',api_key:'sk-fixture-personal-key-at-least-20'})})
+    assert.equal(saved.status,200)
+    assert.equal((await status()).configured,true)
+    assert.ok(!JSON.stringify(await status()).includes('sk-fixture'))
+    const stored = (await db.query('SELECT encrypted_key FROM user_ai_settings WHERE user_id=$1',[owner])).rows[0].encrypted_key
+    assert.ok(!stored.includes('sk-fixture'))
+    assert.equal((await status({Authorization:`Bearer ${jwt.sign({sub:other},process.env.JWT_SECRET)}`})).configured,false)
     const response = await query(jwt.sign({sub:owner},process.env.JWT_SECRET))
     assert.equal(response.status,200)
     const draft = (await response.json()).data
@@ -41,7 +55,23 @@ async function main() {
     await assert.rejects(sendDraft(owner,draft.id,{...input,content:'Other text'},deliver))
     const pair = await Promise.allSettled([sendDraft(owner,draft.id,input,deliver),sendDraft(owner,draft.id,input,deliver)])
     assert.equal(pair.filter(x=>x.status==='fulfilled').length,1); assert.equal(sends,1)
-    console.log('PASS: authenticated suggestion -> exact review draft -> explicit send once; cross-user access blocked; no real delivery')
+    const list = await (await fetch(root+'/api/whatsapp/messages/conversations',{headers})).json()
+    assert.equal(list.data.length,1)
+    const thread = await (await fetch(root+'/api/whatsapp/messages/conversations/fixture-chat',{headers})).json()
+    assert.equal(thread.data.length,2); assert.ok(thread.data.some(m=>m.from_me))
+    const foreign = await (await fetch(root+'/api/whatsapp/messages/conversations/fixture-chat',{headers:{Authorization:`Bearer ${jwt.sign({sub:other},process.env.JWT_SECRET)}`}})).json()
+    assert.equal(foreign.data.length,0)
+    const date = (await db.query("SELECT to_char(NOW() AT TIME ZONE timezone,'YYYY-MM-DD') AS day FROM users WHERE id=$1",[owner])).rows[0].day
+    const beforeReport = modelCalls
+    const report = () => fetch(root+'/api/assistant/reports',{method:'POST',headers,body:JSON.stringify({date})})
+    const generated = await Promise.all([report(),report()])
+    assert.ok(generated.every(r=>r.status===200))
+    assert.equal(modelCalls,beforeReport+1,'Concurrent requests generate a daily report only once')
+    const foreignReports = await (await fetch(root+'/api/assistant/reports',{headers:{Authorization:`Bearer ${jwt.sign({sub:other},process.env.JWT_SECRET)}`}})).json()
+    assert.equal(foreignReports.data.length,0)
+    await fetch(root+'/api/assistant/settings/key',{method:'DELETE',headers})
+    assert.equal((await status()).configured,false,'Removing own key never falls back to platform')
+    console.log('PASS: personal key isolation/removal, encrypted storage, private conversations, cached daily report, send once; no real delivery')
   } finally {
     global.fetch=originalFetch
     if(server) await new Promise(resolve=>server.close(resolve))

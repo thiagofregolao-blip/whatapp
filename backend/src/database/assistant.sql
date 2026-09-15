@@ -29,3 +29,28 @@ CREATE TABLE IF NOT EXISTS whatsapp_auth (
   encrypted_value TEXT NOT NULL,
   PRIMARY KEY (session_id, key)
 );
+
+-- Existing accounts keep their explicitly configured platform access; new accounts
+-- have no platform subsidy unless it is provisioned separately.
+DO $$ BEGIN
+  IF to_regclass('public.user_ai_settings') IS NULL THEN
+    CREATE TABLE user_ai_settings (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      mode TEXT NOT NULL DEFAULT 'personal' CHECK (mode IN ('personal','platform')),
+      encrypted_key TEXT,
+      platform_access BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    INSERT INTO user_ai_settings(user_id, mode, platform_access)
+      SELECT id, 'platform', TRUE FROM users;
+  END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS daily_reports (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  report_date DATE NOT NULL,
+  content TEXT NOT NULL,
+  message_count INTEGER NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(user_id, report_date)
+);

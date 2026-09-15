@@ -14,6 +14,7 @@ export default function RealtimeVoice(props: Props) {
   const [phase, setPhase] = useState<'idle' | 'connecting' | 'connected'>('idle')
   const [error, setError] = useState('')
   const [caption, setCaption] = useState('')
+  const alertMode = useRef('manual')
   const [configured, setConfigured] = useState<boolean | null>(null)
   const selected = useRef(messageId)
   selected.current = messageId
@@ -30,10 +31,12 @@ export default function RealtimeVoice(props: Props) {
   useEffect(() => {
     let active = true
     const check = () => api('/api/assistant/status').then(s => { if (active) setConfigured(s.configured) }).catch(() => { if (active) setConfigured(null) })
+    const readPreferences = () => { alertMode.current = localStorage.getItem('nexo-alerts') || 'manual' }
+    readPreferences(); window.addEventListener('nexo-preferences', readPreferences)
     check(); const timer = setInterval(check, 30000)
     const hide = () => { if (document.hidden) stop() }
     document.addEventListener('visibilitychange', hide)
-    return () => { active = false; clearInterval(timer); document.removeEventListener('visibilitychange', hide); stop() }
+    return () => { active = false; window.removeEventListener('nexo-preferences', readPreferences); clearInterval(timer); document.removeEventListener('visibilitychange', hide); stop() }
   }, [])
 
   async function start() {
@@ -74,7 +77,7 @@ export default function RealtimeVoice(props: Props) {
         if (r.needsResponse) { respond(); return }
         const event = latest.current.voiceEvent
         if (event && lastVoiceEvent.current !== event.id) { lastVoiceEvent.current = event.id; tell(event.text); return }
-        if (latest.current.draft) return
+        if (latest.current.draft || alertMode.current !== 'notify') return
         const fresh = latest.current.incoming.filter(m => !announced.current.has(m.id)).slice(-5)
         if (!fresh.length) return
         fresh.forEach(m => announced.current.add(m.id))
@@ -127,15 +130,15 @@ export default function RealtimeVoice(props: Props) {
       if (current()) await r.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp })
     } catch (e: any) { if (current()) { stop(); setError(e.name === 'NotAllowedError' ? 'Permita o microfone para conversar por voz.' : e.message || 'Falha ao iniciar voz.') } }
   }
-  return <div className="rounded-2xl border border-emerald-400/30 bg-[#172a32] p-4">
+  return <div className="rounded-2xl border border-emerald-400/30 bg-[var(--nx-panel)] p-4">
     <h2 className="font-semibold">Luna · voz em tempo real</h2>
-    <p className="text-sm text-slate-300 mt-2">Luna avisa quando chega mensagem, lê quando você pede e preenche sua resposta. A voz é gerada por IA.</p>
-    {configured === false && <p role="status" className="text-amber-200 text-sm mt-2">Aguardando a chave da OpenAI no Railway. Texto e voz serão ativados após configurar OPENAI_API_KEY no serviço whatapp.</p>}
-    <p className="text-xs text-slate-400 my-3">Ao iniciar, seu microfone é enviado à OpenAI; consultas à Luna usam as mensagens do recorte selecionado. A API é cobrada por uso. Encerre quando terminar. Para enviar, basta pedir à Luna. Mantenha esta página aberta para os avisos por voz.</p>
-    <button disabled={configured === false && phase === 'idle'} onClick={phase === 'idle' ? start : stop} className="rounded-xl bg-[#4ff07f] text-[#00351b] px-4 py-3 font-semibold disabled:opacity-40">{phase === 'idle' ? 'Ativar assistente por voz' : phase === 'connecting' ? 'Cancelar conexão' : 'Encerrar voz'}</button>
+    <p className="text-sm text-[var(--nx-muted)] mt-2">Pergunte o que chegou, ouça e responda sem digitar. Voz gerada por IA.</p>
+    {configured === false && <p role="status" className="text-amber-200 text-sm mt-2">Configure sua chave OpenAI em Perfil para ativar a Luna.</p>}
+    <p className="text-xs text-[var(--nx-muted)] my-3">Ao iniciar, seu microfone é enviado à OpenAI; consultas à Luna usam as mensagens do recorte selecionado. A API é cobrada por uso. Encerre quando terminar. Para enviar, basta pedir à Luna. Mantenha esta página aberta para os avisos por voz.</p>
+    <button disabled={configured === false && phase === 'idle'} onClick={phase === 'idle' ? start : stop} className="rounded-xl bg-[var(--nx-accent)] text-[var(--nx-bg)] px-4 py-3 font-semibold disabled:opacity-40">{phase === 'idle' ? 'Ativar assistente por voz' : phase === 'connecting' ? 'Cancelar conexão' : 'Encerrar voz'}</button>
     <p role="status" className="text-sm mt-2">{phase === 'connected' ? 'Microfone ativo · pode falar e interromper a resposta' : phase === 'connecting' ? 'Conectando…' : ''}</p>
     {error && <p role="alert" className="text-red-200 text-sm mt-2">{error}</p>}
-    {caption && <p aria-live="polite" className="text-sm text-slate-200 mt-3 whitespace-pre-wrap">{caption}</p>}
+    {caption && <p aria-live="polite" className="text-sm text-[var(--nx-text)] mt-3 whitespace-pre-wrap">{caption}</p>}
     <audio ref={player} autoPlay controls className={phase === 'idle' ? 'hidden' : 'w-full mt-3'} />
   </div>
 }
