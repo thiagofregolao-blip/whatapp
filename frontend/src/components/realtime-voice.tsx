@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '@/lib/api'
 import { InboxMessage, ReviewDraft } from '@/lib/assistant-flow'
 
-type VoiceResources = { pc: RTCPeerConnection; stream?: MediaStream; channel?: RTCDataChannel; timer?: ReturnType<typeof setTimeout>; abort: AbortController; pump?: ReturnType<typeof setInterval>; responding?: boolean; speaking?: boolean; audioPlaying?: boolean; pendingTools?: number; flush?: () => void }
+type VoiceResources = { pc: RTCPeerConnection; stream?: MediaStream; channel?: RTCDataChannel; timer?: ReturnType<typeof setTimeout>; abort: AbortController; pump?: ReturnType<typeof setInterval>; responding?: boolean; needsResponse?: boolean; speaking?: boolean; audioPlaying?: boolean; pendingTools?: number; flush?: () => void }
 
 type Props = { messageId?: string; incoming: InboxMessage[]; draft: ReviewDraft | null; onAction: (name: string, args: any) => Promise<any>; onConfirm: (text: string, draftId: string) => Promise<any>; voiceEvent: { id: number; text: string } | null }
 export default function RealtimeVoice(props: Props) {
@@ -62,10 +62,16 @@ export default function RealtimeVoice(props: Props) {
       const handled = new Set<string>()
       const speechDrafts = new Map<string, string>()
       const transcribed = new Set<string>()
-      const respond = () => { r.responding = true; channel.send(JSON.stringify({ type: 'response.create' })) }
+      const respond = () => {
+        r.needsResponse = true
+        if (r.responding || r.speaking || r.audioPlaying || r.pendingTools) return
+        r.needsResponse = false; r.responding = true
+        channel.send(JSON.stringify({ type: 'response.create' }))
+      }
       const tell = (text: string) => { channel.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } })); respond() }
       r.flush = () => {
         if (!current() || channel.readyState !== 'open' || r.responding || r.speaking || r.audioPlaying || r.pendingTools) return
+        if (r.needsResponse) { respond(); return }
         const event = latest.current.voiceEvent
         if (event && lastVoiceEvent.current !== event.id) { lastVoiceEvent.current = event.id; tell(event.text); return }
         if (latest.current.draft) return
