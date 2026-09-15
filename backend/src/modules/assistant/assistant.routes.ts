@@ -6,7 +6,7 @@ import { db } from '../../database/connection'
 import { authenticate } from '../../middleware/auth'
 import { audioOriginal } from '../whatsapp/baileys.service'
 import { encryptUserKey, userAiSettings, userApiKey } from './credentials'
-import { createDraft, createChatDraft, sendDraft } from './replies'
+import { createDraft, createChatDraft, createNamedDraft, sendDraft } from './replies'
 
 export const assistantRouter = Router()
 export const messagesRouter = Router()
@@ -14,6 +14,11 @@ const route = (fn: (req: Request, res: Response) => Promise<any>) => (req: Reque
 assistantRouter.use(authenticate)
 messagesRouter.use(authenticate)
 const visible = '(expires_at IS NULL OR expires_at > NOW())'
+
+assistantRouter.post('/drafts/by-contact', route(async (req,res) => {
+  const input=z.object({recipient:z.string().trim().min(1).max(100),content:z.string().trim().min(1).max(4000)}).strict().parse(req.body)
+  res.json({success:true,data:await createNamedDraft(req.user!.id,input.recipient,input.content)})
+}))
 
 messagesRouter.get('/', route(async (req, res) => {
   const q = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).default(0), group_id: z.string().uuid().optional(), min_urgency: z.coerce.number().int().min(1).max(5).default(1), only_mentions: z.enum(['true','false']).optional() }).parse(req.query)
@@ -34,9 +39,10 @@ messagesRouter.get('/conversations', route(async (req, res) => {
     SELECT l.id, ids.chat_id, COALESCE(c.name,l.chat_name,l.sender_name,ids.chat_id) AS chat_name,
       COALESCE(l.chat_type::text,CASE WHEN ids.chat_id LIKE '%@g.us' THEN 'group' ELSE 'individual' END) AS chat_type,
       l.sender_name,l.content,l.media_type,COALESCE(l.sent_at,c.last_message_at) AS sent_at,l.from_me,
-      d.content AS outgoing_content,d.sent_at AS outgoing_at
+      d.content AS outgoing_content,d.sent_at AS outgoing_at, pending.content AS draft_content
     FROM ids LEFT JOIN latest l ON l.chat_id=ids.chat_id LEFT JOIN chats c ON c.chat_id=ids.chat_id
     LEFT JOIN LATERAL (SELECT content, sent_at FROM reply_drafts WHERE user_id=$1 AND chat_id=ids.chat_id AND status='sent' AND EXISTS(SELECT 1 FROM whatsapp_sessions ws WHERE ws.id=reply_drafts.session_id AND ws.user_id=reply_drafts.user_id AND ws.unipile_account_id=reply_drafts.account_id) ORDER BY sent_at DESC LIMIT 1) d ON true
+    LEFT JOIN LATERAL (SELECT content FROM reply_drafts WHERE user_id=$1 AND chat_id=ids.chat_id AND status='draft' AND expires_at>NOW() AND EXISTS(SELECT 1 FROM whatsapp_sessions ws WHERE ws.id=reply_drafts.session_id AND ws.unipile_account_id=reply_drafts.account_id) ORDER BY created_at DESC LIMIT 1) pending ON true
     ORDER BY GREATEST(l.sent_at,c.last_message_at,d.sent_at) DESC NULLS LAST, ids.chat_id LIMIT 100 OFFSET $2`, [req.user!.id,offset])
   res.setHeader('Cache-Control', 'no-store'); res.json({ success: true, data: result.rows })
 }))

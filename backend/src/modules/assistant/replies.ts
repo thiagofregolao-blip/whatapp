@@ -1,3 +1,4 @@
+import { directory } from '../whatsapp/contacts'
 import crypto from 'crypto'
 import { sendAuthorized } from '../whatsapp/baileys.service'
 import { db } from '../../database/connection'
@@ -55,10 +56,19 @@ async function sendToProvider(draft: any): Promise<any> {
 
 export async function createChatDraft(userId: string, chatId: string, content: string) {
   const found = await db.query(`SELECT ws.id,ws.unipile_account_id,ws.provider,c.name FROM whatsapp_sessions ws
-    JOIN whatsapp_chats c ON c.user_id=ws.user_id AND c.account_id=ws.unipile_account_id
+    JOIN (SELECT user_id,account_id,chat_id,name FROM whatsapp_chats UNION SELECT user_id,account_id,chat_id,COALESCE(name,notify) FROM whatsapp_contacts) c ON c.user_id=ws.user_id AND c.account_id=ws.unipile_account_id
     WHERE ws.user_id=$1 AND c.chat_id=$2 AND ws.status='connected'`, [userId,chatId])
   const s = found.rows[0]
   if (!s) throw new Error('Conversa indisponível na conta conectada')
   return (await db.query(`INSERT INTO reply_drafts(user_id,session_id,account_id,chat_id,recipient,content,confirmation_token,provider)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[userId,s.id,s.unipile_account_id,chatId,s.name || chatId,content,crypto.randomBytes(32).toString('hex'),s.provider])).rows[0]
+}
+
+export async function createNamedDraft(userId: string, recipient: string, content: string) {
+  const matches = await directory(userId,recipient)
+  if (matches.length !== 1) return { status:matches.length ? 'ambiguous' : 'not_found', contacts:matches.slice(0,8).map(c => ({name:c.name,chat_id:c.chat_id})), message:matches.length ? 'Pergunte qual contato pelo nome; nunca peça IDs.' : 'Contato não encontrado na agenda sincronizada. Não peça ID; informe que a agenda ainda pode estar sincronizando.' }
+  const c=matches[0]
+  // A fallback message may predate chat metadata; materialize only the matched conversation.
+  await db.query(`INSERT INTO whatsapp_chats(user_id,account_id,chat_id,name) SELECT user_id,unipile_account_id,$2,$3 FROM whatsapp_sessions WHERE user_id=$1 ON CONFLICT DO NOTHING`,[userId,c.chat_id,c.name])
+  return createChatDraft(userId,c.chat_id,content)
 }

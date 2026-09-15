@@ -36,6 +36,7 @@ export default function Assistant() {
   function installDraft(value: any) {
     const ready: Draft = value
     setReply(ready.content); setDraft(ready)
+    window.dispatchEvent(new CustomEvent('luna-draft',{detail:ready}))
     return { message_id: value.message_id, recipient: ready.recipient, content: ready.content, status: 'draft_ready' }
   }
   const [error, setError] = useState('')
@@ -165,13 +166,23 @@ export default function Assistant() {
     try {
       await api(`/api/assistant/drafts/${d.id}/send`, { method: 'POST', body: JSON.stringify({ authorize: true, confirmation_token: d.confirmation_token, chat_id: d.chat_id, content: d.content }) })
       const result = `Mensagem enviada para ${d.recipient}.`
-      setNotice(result); setReply(''); if (announce) setVoiceEvent({ id: Date.now(), text: `resultado_envio: status sent. Diga apenas: Enviado.` })
+      setNotice(result); setReply(''); window.dispatchEvent(new CustomEvent('luna-sent',{detail:{chat_id:d.chat_id,content:d.content,recipient:d.recipient}})); if (announce) setVoiceEvent({ id: Date.now(), text: `resultado_envio: status sent. Diga apenas: Enviado.` })
       return { status: 'sent', message: 'Enviado.' }
     } catch (e: any) {
       setError(e.message); if (announce) setVoiceEvent({ id: Date.now(), text: `resultado_envio: status unknown. Não confirme sucesso. ${e.message}` }); return { status: 'unknown', error: e.message }
     } finally { sendLock.current = false; setBusy(false) }
   }
   async function voiceAction(name: string, args: any) {
+    if (name === 'enviar_mensagem' || name === 'preparar_mensagem') {
+      if (sendLock.current || busy) throw new Error('Aguarde a ação atual.')
+      const version=++revision.current
+      const result=await api('/api/assistant/drafts/by-contact',{method:'POST',body:JSON.stringify({recipient:args.recipient,content:args.content})})
+      if (!result.id) return result
+      if (revision.current!==version) throw new Error('A conversa mudou. Faça o pedido novamente.')
+      installDraft(result)
+      if (name === 'enviar_mensagem') return authorize(result.id,false)
+      return {status:'draft_ready',recipient:result.recipient,content:result.content}
+    }
     if (name === 'cancelar_resposta') { invalidateDraft(); return { status: 'cancelled', message: 'Rascunho cancelado. A confirmação anterior não pode enviar.' } }
     const m = await findMessage(args.message_id)
     if (name === 'enviar_resposta') {

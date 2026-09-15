@@ -128,6 +128,17 @@ export default function RealtimeVoice(props: Props) {
             if (typeof args.question !== 'string') throw new Error('Pergunta inválida')
             setCaption('Luna está consultando suas mensagens…')
             output = await api('/api/assistant/chat', { method: 'POST', signal: r.abort.signal, body: JSON.stringify({ question: args.question, message_id: args.message_id || selected.current, history: [] }) })
+          } else if (['buscar_contatos','ler_conversa'].includes(data.name)) {
+            if (typeof args.name !== 'string') throw new Error('Qual contato?')
+            output = await api(`/api/whatsapp/contacts?q=${encodeURIComponent(args.name)}`)
+            if (data.name === 'ler_conversa' && output.total===1) {const contact=output.contacts[0];output={contact:contact.name,messages:(await api(`/api/whatsapp/messages/conversations/${encodeURIComponent(contact.chat_id)}`)).slice(-30)}}
+          } else if (['enviar_mensagem','preparar_mensagem'].includes(data.name)) {
+            if (typeof args.recipient !== 'string' || typeof args.content !== 'string' || !args.content.trim() || args.content.length>4000) throw new Error('Informe o contato e a mensagem.')
+            if (data.name === 'enviar_mensagem') {
+              if (!userUtterance || sentUtterances.has(userUtterance)) throw new Error('Este pedido já foi processado. Não repita.')
+              sentUtterances.add(userUtterance)
+            }
+            output = await latest.current.onAction(data.name,args)
           } else if (['abrir_mensagem', 'preparar_resposta', 'cancelar_resposta', 'ouvir_audio', 'enviar_resposta'].includes(data.name)) {
             if (data.name !== 'cancelar_resposta' && typeof args.message_id !== 'string') throw new Error('Selecione a mensagem correta antes de continuar.')
             if (['preparar_resposta', 'enviar_resposta'].includes(data.name) && (typeof args.content !== 'string' || !args.content.trim() || args.content.length > 4000)) throw new Error('Texto de resposta inválido.')

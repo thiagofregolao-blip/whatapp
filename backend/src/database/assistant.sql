@@ -63,3 +63,19 @@ CREATE TABLE IF NOT EXISTS whatsapp_chats (
   last_message_at TIMESTAMPTZ,
   PRIMARY KEY(user_id, account_id, chat_id)
 );
+
+CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  name TEXT,
+  notify TEXT,
+  aliases TEXT[] NOT NULL DEFAULT '{}',
+  photo_url TEXT,
+  photo_checked_at TIMESTAMPTZ,
+  PRIMARY KEY(user_id,account_id,chat_id)
+);
+ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS history_requested_at TIMESTAMPTZ;
+ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS history_received_at TIMESTAMPTZ;
+ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS history_progress INTEGER;
+ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS history_error TEXT;

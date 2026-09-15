@@ -8,8 +8,22 @@ import { UnipileWebhookEvent, ApiResponse } from '../../types'
 import { db } from '../../database/connection'
 import { handleQRStream, notifyQRUpdate, notifyAccountConnected } from './qr-stream'
 
+import { directory } from './contacts'
+
 const router = Router()
 const safe = (fn: (req: Request, res: Response) => Promise<any>) => (req: Request, res: Response, next: NextFunction) => { fn(req, res).catch(next) }
+
+router.get('/contacts', authenticate, safe(async (req,res) => {
+  const query=String(req.query.q || '').slice(0,100)
+  const matches=await directory(req.user!.id,query)
+  const offset=Math.max(0,Number(req.query.offset) || 0)
+  res.setHeader('Cache-Control','no-store');res.json({success:true,data:{contacts:matches.slice(offset,offset+50),total:matches.length}})
+}))
+router.get('/contacts/:chatId/photo', authenticate, safe(async (req,res) => {
+  const url=await baileys.contactPhoto(req.user!.id,req.params.chatId)
+  res.setHeader('Cache-Control','no-store');res.json({success:true,data:{url}})
+}))
+router.post('/history/sync', authenticate, safe(async (req,res) => { res.json({success:true,data:await baileys.requestHistory(req.user!.id)}) }))
 
 // ============================================
 // POST /whatsapp/connect — iniciar conexão + QR
@@ -42,6 +56,7 @@ router.get('/status', authenticate, safe(async (req: Request, res: Response) => 
           display_name: session.display_name,
           connected_at: session.connected_at,
           last_activity_at: session.last_activity_at,
+          history_requested_at: (session as any).history_requested_at, history_received_at: (session as any).history_received_at, history_progress: (session as any).history_progress, history_error: (session as any).history_error,
         }
       : null,
   })

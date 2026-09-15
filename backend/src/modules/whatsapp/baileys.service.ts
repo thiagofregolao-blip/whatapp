@@ -1,3 +1,4 @@
+import { rememberContacts, directory } from './contacts'
 import crypto from 'crypto'
 import pino from 'pino'
 import { db } from '../../database/connection'
@@ -65,6 +66,7 @@ async function startSocket(session: any, retries=0): Promise<any> {
         runtime.open = true; retries = 0
         console.info('[Baileys] Conexão aberta')
         await db.query("UPDATE whatsapp_sessions SET status='connected',display_name=$2,phone_number_encrypted=$3,connected_at=NOW(),qr_code=NULL,qr_expires_at=NULL,error_message=NULL WHERE id=$1",[session.id,socket.user?.name || null,lib.jidNormalizedUser(socket.user?.id || '')])
+        if (!session.history_received_at && !session.history_requested_at) void requestHistory(session.user_id).catch(() => {})
         syncGroups(session.user_id).catch(() => console.warn('[Baileys] Grupos pendentes de sincronização'))
       }
       if (update.connection === 'close') {
@@ -97,10 +99,18 @@ async function startSocket(session: any, retries=0): Promise<any> {
     let accepted = 0, stored = 0
     for (const raw of messages) {
       if (runtime.stopped || stopping) return
+      const response=lib.normalizeMessageContent(raw.message)?.protocolMessage?.peerDataOperationRequestResponseMessage
+      for(const result of response?.peerDataOperationResult || []) {
+        const full=result.fullHistorySyncOnDemandRequestResponse
+        if(full && full.responseCode !== undefined && Number(full.responseCode)!==0) {
+          console.info('[Baileys] Histórico não autorizado pelo aparelho',{code:Number(full.responseCode)})
+          await db.query("UPDATE whatsapp_sessions SET history_error='O WhatsApp não liberou o histórico desta sessão. Conecte novamente pelo QR para solicitar a importação inicial.' WHERE id=$1",[session.id])
+        }
+      }
       const event = normalizeIncoming(raw, session.unipile_account_id, lib, true)
       if (!event) continue
       accepted++
-      const known = await db.query('SELECT name FROM whatsapp_chats WHERE user_id=$1 AND account_id=$2 AND chat_id=$3', [session.user_id,session.unipile_account_id,event.data.chat_id])
+      const known = await db.query('SELECT COALESCE(name,notify) AS name FROM whatsapp_contacts WHERE user_id=$1 AND account_id=$2 AND (chat_id=$3 OR $3=ANY(aliases)) AND COALESCE(name,notify) IS NOT NULL UNION ALL SELECT name FROM whatsapp_chats WHERE user_id=$1 AND account_id=$2 AND chat_id=$3 LIMIT 1', [session.user_id,session.unipile_account_id,event.data.chat_id])
       if (event.data.is_group) {
         const group = await db.query('SELECT name FROM groups WHERE user_id=$1 AND whatsapp_chat_id=$2',[session.user_id,event.data.chat_id])
         event.data.chat_name = known.rows[0]?.name || group.rows[0]?.name || event.data.chat_id
@@ -119,10 +129,13 @@ async function startSocket(session: any, retries=0): Promise<any> {
   }
   socket.ev.on('messaging-history.set', ({chats, contacts, messages, progress}: any) => queue(async () => {
     await rememberChats(chats || [])
-    for (const c of contacts || []) if (c.id && (c.name || c.notify)) await db.query('UPDATE whatsapp_chats SET name=$4 WHERE user_id=$1 AND account_id=$2 AND chat_id=$3',[session.user_id,session.unipile_account_id,c.id,c.name || c.notify])
+    await rememberContacts(session.user_id,session.unipile_account_id,contacts || [])
     await ingest(messages || [], 'history')
+    await db.query('UPDATE whatsapp_sessions SET history_received_at=NOW(),history_progress=$2,history_error=NULL WHERE id=$1',[session.id,Number.isFinite(progress) ? Math.min(100,Math.max(0,progress)) : null])
     console.info('[Baileys] Histórico sincronizado', { chats:chats?.length || 0, messages:messages?.length || 0, progress })
   }))
+  socket.ev.on('contacts.upsert', (contacts: any[]) => queue(() => rememberContacts(session.user_id,session.unipile_account_id,contacts)))
+  socket.ev.on('contacts.update', (contacts: any[]) => queue(() => rememberContacts(session.user_id,session.unipile_account_id,contacts)))
   socket.ev.on('chats.upsert', (chats: any[]) => queue(() => rememberChats(chats)))
   socket.ev.on('chats.update', (chats: any[]) => queue(() => rememberChats(chats)))
   socket.ev.on('messages.upsert', ({ messages, type }: any) => {
@@ -138,7 +151,7 @@ export async function connect(userId: string) {
     if (running && !running.stopped && !(session.qr_code && new Date(session.qr_expires_at).getTime() <= Date.now())) return session
     if (running) { running.stopped=true; clearTimeout(running.retry); running.socket.end(new Error('New connection')); await running.serial }
     const result = await db.query(`INSERT INTO whatsapp_sessions(user_id,unipile_account_id,status,provider) VALUES($1,$2,'connecting','baileys')
-      ON CONFLICT(user_id) DO UPDATE SET unipile_account_id=$2,provider='baileys',status='connecting',qr_code=NULL,qr_expires_at=NULL,error_message=NULL,display_name=NULL,phone_number_encrypted=NULL,connected_at=NULL RETURNING *`,[userId,`baileys:${crypto.randomUUID()}`])
+      ON CONFLICT(user_id) DO UPDATE SET unipile_account_id=$2,provider='baileys',status='connecting',qr_code=NULL,qr_expires_at=NULL,error_message=NULL,display_name=NULL,phone_number_encrypted=NULL,connected_at=NULL,history_requested_at=NULL,history_received_at=NULL,history_progress=NULL,history_error=NULL RETURNING *`,[userId,`baileys:${crypto.randomUUID()}`])
     session = result.rows[0]
     await db.query('DELETE FROM whatsapp_auth WHERE session_id=$1',[session.id])
     try { await startSocket(session) } catch {
@@ -214,3 +227,46 @@ export async function restore() {
   }
 }
 export function shutdown() { stopping = true; clearTimeout(ownershipRetry); for (const r of runtimes.values()) { r.stopped=true; clearTimeout(r.retry); r.socket.end(new Error('Server shutdown')) } }
+
+export async function requestHistory(userId: string) {
+  const r = runtimes.get(userId)
+  if (!r?.open) throw new Error('WhatsApp não conectado')
+  const claimed = await db.query(`UPDATE whatsapp_sessions SET history_requested_at=NOW(),history_error=NULL WHERE id=$1 AND (history_requested_at IS NULL OR history_requested_at<NOW()-INTERVAL '5 minutes') RETURNING id`,[r.session.id])
+  if (!claimed.rows.length) return { status:'requested', message:'O pedido já foi feito. Aguarde o WhatsApp enviar o histórico.' }
+  try {
+    const lib = await libPromise()
+    await r.socket.sendPeerDataOperationMessage({
+      peerDataOperationRequestType: lib.proto.Message.PeerDataOperationRequestType.FULL_HISTORY_SYNC_ON_DEMAND,
+      fullHistorySyncOnDemandRequest: { requestMetadata:{requestId:crypto.randomUUID()},historySyncConfig:{storageQuotaMb:10240,supportGroupHistory:true,onDemandReady:true,completeOnDemandReady:true} }
+    })
+    // Existing conversations can also request earlier messages using a real provider anchor.
+    const anchors=(await db.query(`SELECT DISTINCT ON(chat_id) provider_payload->'key' AS key,sent_at FROM messages WHERE user_id=$1 AND session_id=$2 AND source_account_id=$3 AND provider_payload->'key'->>'id' IS NOT NULL ORDER BY chat_id,sent_at ASC LIMIT 50`,[userId,r.session.id,r.session.unipile_account_id])).rows
+    let requested=0
+    for(const anchor of anchors) { if(!r.open || r.stopped || stopping) break; try {await r.socket.fetchMessageHistory(50,anchor.key,new Date(anchor.sent_at).getTime());requested++}catch{break} }
+    console.info('[Baileys] Histórico solicitado ao aparelho',{conversations:requested})
+    return { status:'requested', message:'Histórico solicitado. Mantenha o WhatsApp do celular conectado à internet.' }
+  } catch {
+    await db.query("UPDATE whatsapp_sessions SET history_error='Não foi possível solicitar o histórico. Tente novamente.' WHERE id=$1",[r.session.id])
+    throw new Error('Não foi possível solicitar o histórico. Tente novamente.')
+  }
+}
+const photoRequests = new Map<string,Promise<string | null>>()
+export async function contactPhoto(userId: string, chatId: string): Promise<string | null> {
+  const r = runtimes.get(userId)
+  if (!r?.open) return null
+  if (chatId === 'self') chatId = r.socket.user?.id?.replace(/:\d+@/,'@') || ''
+  else if (!(await directory(userId)).some(c => c.chat_id === chatId || c.aliases?.includes(chatId))) throw new Error('Contato indisponível')
+  if (!/(@s\.whatsapp\.net|@g\.us|@lid)$/.test(chatId)) return null
+  const account=r.session.unipile_account_id
+  const cached=(await db.query('SELECT photo_url,photo_checked_at FROM whatsapp_contacts WHERE user_id=$1 AND account_id=$2 AND chat_id=$3',[userId,account,chatId])).rows[0]
+  if (cached?.photo_checked_at && Date.now()-new Date(cached.photo_checked_at).getTime()<3600000) return cached.photo_url
+  const key=`${userId}:${account}:${chatId}`
+  if (photoRequests.has(key)) return photoRequests.get(key)!
+  const work=(async () => {
+    let url: string | null=null
+    try { const value=await r.socket.profilePictureUrl(chatId,'image',5000); if (value && /^https:\/\//.test(value)) url=value } catch { /* Privacy settings or missing picture. */ }
+    await db.query(`INSERT INTO whatsapp_contacts(user_id,account_id,chat_id,photo_url,photo_checked_at) VALUES($1,$2,$3,$4,NOW()) ON CONFLICT(user_id,account_id,chat_id) DO UPDATE SET photo_url=$4,photo_checked_at=NOW()`,[userId,account,chatId,url])
+    return url
+  })().finally(() => photoRequests.delete(key))
+  photoRequests.set(key,work);return work
+}

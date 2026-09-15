@@ -28,7 +28,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }, [])
   return <AppContext.Provider value={{ user, session, refreshUser }}>
     <div className="nexo-shell" data-theme={theme}>
-      <header className="nexo-header"><h1>{path === '/messages' ? 'Mensagens' : path === '/assistant' ? 'Luna' : path === '/settings' ? 'Perfil' : 'WhatsApp'}</h1><div className="header-actions"><button aria-label="Buscar mensagens" className="icon-button" onClick={() => { window.dispatchEvent(new Event('luna-search')) }}><Search /></button><Link href="/settings" className="profile-link" aria-label="Abrir perfil"><Avatar name={user?.name || user?.email || 'Você'} /></Link></div></header>
+      <header className="nexo-header"><h1>{path === '/messages' ? 'Mensagens' : path === '/assistant' ? 'Luna' : path === '/settings' ? 'Perfil' : 'WhatsApp'}</h1><div className="header-actions"><button aria-label="Buscar mensagens" className="icon-button" onClick={() => { window.dispatchEvent(new Event('luna-search')) }}><Search /></button><Link href="/settings" className="profile-link" aria-label="Abrir perfil"><Avatar name={user?.name || user?.email || 'Você'} chatId="self" /></Link></div></header>
       {error && <div role="alert" className="nexo-error">{error} <button onClick={refreshUser}>Tentar novamente</button> · <Link href="/auth/login">Entrar novamente</Link></div>}
       {children}
       <div id="luna-voice-host" />

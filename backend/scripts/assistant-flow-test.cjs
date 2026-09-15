@@ -85,7 +85,25 @@ async function main() {
     const logged = await authService.login({email:` ${email.toUpperCase()} `,password:'fixture-login-password'})
     assert.ok(logged.access_token)
     await assert.rejects(authService.login({email,password:'incorrect'}),/Credenciais/)
-    console.log('PASS: personal key isolation/removal, encrypted storage, private conversations, cached daily report, send once; no real delivery')
+    const {rememberContacts,directory}=require('../dist/modules/whatsapp/contacts')
+    const {createNamedDraft}=require('../dist/modules/assistant/replies')
+    await rememberContacts(owner,`fixture-${owner}`,[{id:'551199900001@s.whatsapp.net',name:'José da Silva',lid:'123@lid'},{id:'551199900002@s.whatsapp.net',name:'Ana Souza'},{id:'551199900003@s.whatsapp.net',name:'Ana Lima'}])
+    assert.equal((await directory(owner,'jose')).length,1,'Accent-insensitive contact search does not need a received message')
+    assert.equal((await directory(other,'jose')).length,0,'Contact search remains scoped to the user')
+    const ambiguous=await createNamedDraft(owner,'Ana','Mensagem fictícia')
+    assert.equal(ambiguous.status,'ambiguous');assert.equal(ambiguous.contacts.length,2)
+    assert.equal((await createNamedDraft(owner,'Inexistente','Teste')).status,'not_found')
+    const named=await createNamedDraft(owner,'jose','Mensagem fictícia')
+    assert.equal(named.message_id,null);assert.equal(named.chat_id,'551199900001@s.whatsapp.net')
+    let namedSends=0
+    const namedInput={authorize:true,confirmation_token:named.confirmation_token,chat_id:named.chat_id,content:named.content}
+    const deliverNamed=async d=>{namedSends++;assert.equal(d.recipient,'José da Silva');return {message_id:'named-fixture'}}
+    await assert.rejects(sendDraft(other,named.id,namedInput,deliverNamed))
+    const namedPair=await Promise.allSettled([sendDraft(owner,named.id,namedInput,deliverNamed),sendDraft(owner,named.id,namedInput,deliverNamed)])
+    assert.equal(namedPair.filter(r=>r.status==='fulfilled').length,1);assert.equal(namedSends,1)
+    await db.query('UPDATE whatsapp_sessions SET unipile_account_id=$2 WHERE id=$1',[session,'switched-account'])
+    assert.equal((await directory(owner,'jose')).length,0,'Old account contacts cannot receive new sends')
+    console.log('PASS: personal key isolation/removal, encrypted storage, private conversations, cached daily report, send once, named contacts and ambiguity; no real delivery')
   } finally {
     global.fetch=originalFetch
     if(server) await new Promise(resolve=>server.close(resolve))

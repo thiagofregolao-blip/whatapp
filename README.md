@@ -124,3 +124,9 @@ Validação: 10 testes backend, 2 frontend, build completo, testes PostgreSQL de
 
 ### Login no PWA
 O atalho inicia em `/messages` e usa login próprio. E-mails são normalizados; o campo de senha permite conferir o preenchimento automático. Tokens expirados são renovados quando há refresh token válido. Credenciais incorretas continuam sendo recusadas. Railway usa confiança de um proxy por padrão; `TRUST_PROXY_HOPS` permite ajustar à topologia real.
+
+### Agenda, fotos e histórico
+- Luna busca nomes na agenda e nas conversas da conta conectada; `enviar_mensagem` não depende de mensagem recebida. Homônimos exigem escolher o contato pelo nome, nunca um ID. Busca e envio continuam isolados por usuário e conta, com envio único.
+- Eventos de contatos salvam nome da agenda e aliases LID/telefone. Fotos são consultadas no WhatsApp autenticado, sob demanda, com cache de uma hora; fotos restritas ou ausentes usam iniciais.
+- Ao conectar uma sessão sem histórico, o backend solicita sincronização completa ao aparelho e mensagens anteriores das conversas com âncoras conhecidas. O pedido pode ser recusado pelo WhatsApp; a interface distingue pedido de recebimento. Um novo QR pode ser necessário. Nenhum total de mensagens do telefone é prometido.
+- A lista mostra rascunhos reais e permite iniciar conversa pelo botão de nova mensagem. O atalho de voz usa nomes, sem expor IDs internos.
