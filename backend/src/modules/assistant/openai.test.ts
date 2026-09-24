@@ -15,7 +15,8 @@ test('OpenAI: bounded read-only requests, response parsing and secret stays serv
       assert.equal(body.model, 'gpt-5.6-luna')
       assert.equal(body.store, false)
       assert.equal(body.tools, undefined)
-      assert.equal(JSON.parse(body.input).received_messages[0].content, 'fixture')
+      assert.equal(JSON.parse(body.input).received_messages[0].texto, 'fixture')
+      assert.ok(JSON.parse(body.input).agora)
       return new Response(JSON.stringify({status:'completed', output:[{type:'message',content:[{type:'output_text',text:'Resposta de teste'}]}]}))
     }) as typeof fetch
     assert.equal(await askLuna('Resumo?', [{content:'fixture'}], []), 'Resposta de teste')
