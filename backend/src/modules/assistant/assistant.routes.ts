@@ -8,7 +8,7 @@ import { authenticate } from '../../middleware/auth'
 import { audioBytes, transcribeMessage, transcribePending } from './transcription'
 import { encryptUserKey, userAiSettings, userApiKey } from './credentials'
 import { createDraft, createChatDraft, createNamedDraft, sendDraft } from './replies'
-import { directory, normalizedName } from '../whatsapp/contacts'
+import { directory, matchContacts, normalizedName } from '../whatsapp/contacts'
 
 export const assistantRouter = Router()
 export const messagesRouter = Router()
@@ -19,16 +19,33 @@ const visible = '(expires_at IS NULL OR expires_at > NOW())'
 const userTimezone = async (userId: string) => (await db.query('SELECT timezone FROM users WHERE id=$1', [userId])).rows[0]?.timezone || 'America/Sao_Paulo'
 const lunaColumns = 'id, chat_id, chat_name, chat_type, sender_name, content, media_type, sent_at, from_me, transcript, transcript_status'
 
-// Contacts named in the question ("o que a Ana disse?"), most specific first.
+// Conversations that have messages, as on the Mensagens screen; the name comes from the
+// chat, the contact (including @lid/phone aliases) or the message itself.
+async function activeConversations(userId: string, limit = 60) {
+  return (await db.query(`SELECT * FROM (SELECT DISTINCT ON (m.chat_id) m.chat_id,
+      COALESCE(ct.n, c.name, m.chat_name, CASE WHEN m.from_me THEN NULL ELSE m.sender_name END, m.chat_id) AS name,
+      m.chat_type, m.sent_at AS last_at, m.from_me, m.content, m.media_type, m.transcript
+    FROM messages m
+    LEFT JOIN LATERAL (SELECT name FROM whatsapp_chats x WHERE x.user_id=m.user_id AND x.chat_id=m.chat_id AND x.name IS NOT NULL AND x.name<>x.chat_id LIMIT 1) c ON true
+    LEFT JOIN LATERAL (SELECT COALESCE(x.name,x.notify) AS n FROM whatsapp_contacts x WHERE x.user_id=m.user_id AND (x.chat_id=m.chat_id OR m.chat_id=ANY(x.aliases)) AND COALESCE(x.name,x.notify) IS NOT NULL LIMIT 1) ct ON true
+    WHERE m.user_id=$1 AND ${visible.replace(/expires_at/g, 'm.expires_at')}
+    ORDER BY m.chat_id, m.sent_at DESC) t ORDER BY last_at DESC LIMIT $2`, [userId, limit])).rows
+}
+const conversationSummary = (c: any) => ({ conversa: c.name, tipo: c.chat_type === 'group' ? 'grupo' : 'contato', ultima_mensagem_em: c.last_at, ultima: `${c.from_me ? 'Você: ' : ''}${c.media_type === 'audio' ? (c.transcript ? `[áudio] ${c.transcript}` : '[áudio]') : c.content || `[${c.media_type || 'anexo'}]`}`.slice(0, 140) })
+
+// Contacts named in the question ("o que a Ana disse?"): active conversations first, then the agenda.
 async function chatsNamedIn(userId: string, question: string) {
   const q = ` ${normalizedName(question)} `
   const hits: { chat_id: string; score: number }[] = []
-  for (const c of await directory(userId)) {
+  const active = await activeConversations(userId, 300)
+  for (const c of [...active, ...(await directory(userId))]) {
+    if (hits.some(h => h.chat_id === c.chat_id)) continue
     const name = normalizedName(c.name || c.notify || '')
     if (name.length < 3 || /^\d+$/.test(name.replace(/ /g, ''))) continue
     const first = name.split(' ')[0]
-    if (q.includes(` ${name} `)) hits.push({ chat_id: c.chat_id, score: 2 })
-    else if (first.length >= 3 && q.includes(` ${first} `)) hits.push({ chat_id: c.chat_id, score: 1 })
+    const bonus = active.includes(c) ? 10 : 0
+    if (q.includes(` ${name} `)) hits.push({ chat_id: c.chat_id, score: 2 + bonus })
+    else if (first.length >= 3 && q.includes(` ${first} `)) hits.push({ chat_id: c.chat_id, score: 1 + bonus })
   }
   return hits.sort((a, b) => b.score - a.score).slice(0, 4).map(h => h.chat_id)
 }
@@ -46,16 +63,24 @@ async function lunaContext(userId: string, question: string, messageId?: string)
   const recent = (await db.query(`SELECT ${lunaColumns} FROM messages WHERE user_id=$1 AND ${visible} AND sent_at > NOW() - INTERVAL '7 days' ORDER BY sent_at DESC LIMIT $2`, [userId, focus.length ? 40 : 80])).rows
   const rows = new Map<string, any>()
   for (const m of [...focused, ...recent]) if (!rows.has(m.id)) rows.set(m.id, { ...m, content: m.content?.slice(0, 2000), selected: m.id === selected?.id })
-  const all = [...rows.values()]
+  const names = new Map((await activeConversations(userId, 300)).map(c => [c.chat_id, c.name]))
+  const all = [...rows.values()].map(m => ({ ...m, chat_name: names.get(m.chat_id) || m.chat_name }))
   await transcribePending(userId, all)
   return all
 }
+
+assistantRouter.get('/active-conversations', route(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ success: true, data: { conversas: (await activeConversations(req.user!.id, 40)).map(conversationSummary) } })
+}))
 
 // Reads a conversation by the name the user said. The same person often exists twice
 // (phone JID and @lid), so entries with the same name are merged into one conversation.
 assistantRouter.get('/conversation', route(async (req, res) => {
   const name = z.string().trim().min(1).max(100).parse(req.query.name)
-  const matches = await directory(req.user!.id, name)
+  // Active conversations first: that is where the user expects Luna to look.
+  const active = matchContacts(await activeConversations(req.user!.id, 300), name)
+  const matches = active.length ? active : await directory(req.user!.id, name)
   const groups = new Map<string, { name: string; chats: string[] }>()
   for (const c of matches) {
     const key = normalizedName(c.name || c.chat_id)
@@ -72,7 +97,7 @@ assistantRouter.get('/conversation', route(async (req, res) => {
   if (!pick) return res.json({ success: true, data: { status: 'ambiguous', message: 'Pergunte qual contato pelo nome completo e chame ler_conversa de novo com o nome escolhido. Nunca peça IDs.', contatos: (withMessages.length ? withMessages : candidates).sort((a, b) => (b.last?.getTime() || 0) - (a.last?.getTime() || 0)).slice(0, 8).map(g => ({ nome: g.name, ultima_mensagem: g.last || null })) } })
   const rows = (await conversationRows(req.user!.id, [...new Set(pick.chats)], 30)).sort((a, b) => new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime()).slice(0, 30)
   await transcribePending(req.user!.id, rows)
-  res.json({ success: true, data: { status: rows.length ? 'ok' : 'empty', contato: pick.name, mensagens: formatForLuna(rows, await userTimezone(req.user!.id)), message: rows.length ? undefined : 'O contato existe, mas ainda não há mensagens sincronizadas com ele.' } })
+  res.json({ success: true, data: { status: rows.length ? 'ok' : 'empty', contato: pick.name, mensagens: formatForLuna(rows.map(m => ({ ...m, chat_name: pick.name })), await userTimezone(req.user!.id)), message: rows.length ? undefined : 'O contato existe, mas ainda não há mensagens sincronizadas com ele.' } })
 }))
 
 assistantRouter.post('/drafts/by-contact', route(async (req,res) => {
@@ -96,11 +121,12 @@ messagesRouter.get('/conversations', route(async (req, res) => {
   ), chats AS (
     SELECT c.chat_id,c.name,c.last_message_at FROM whatsapp_chats c JOIN whatsapp_sessions ws ON ws.user_id=c.user_id AND ws.unipile_account_id=c.account_id WHERE c.user_id=$1
   ), ids AS (SELECT chat_id FROM latest UNION SELECT chat_id FROM chats)
-    SELECT l.id, ids.chat_id, COALESCE(c.name,l.chat_name,l.sender_name,ids.chat_id) AS chat_name,
+    SELECT l.id, ids.chat_id, COALESCE(ct.n,NULLIF(c.name,ids.chat_id),NULLIF(l.chat_name,ids.chat_id),CASE WHEN l.from_me THEN NULL ELSE l.sender_name END,ids.chat_id) AS chat_name,
       COALESCE(l.chat_type::text,CASE WHEN ids.chat_id LIKE '%@g.us' THEN 'group' ELSE 'individual' END) AS chat_type,
       l.sender_name,l.content,l.media_type,COALESCE(l.sent_at,c.last_message_at) AS sent_at,l.from_me,
       d.content AS outgoing_content,d.sent_at AS outgoing_at, pending.content AS draft_content
     FROM ids LEFT JOIN latest l ON l.chat_id=ids.chat_id LEFT JOIN chats c ON c.chat_id=ids.chat_id
+    LEFT JOIN LATERAL (SELECT COALESCE(x.name,x.notify) AS n FROM whatsapp_contacts x WHERE x.user_id=$1 AND (x.chat_id=ids.chat_id OR ids.chat_id=ANY(x.aliases)) AND COALESCE(x.name,x.notify) IS NOT NULL LIMIT 1) ct ON true
     LEFT JOIN LATERAL (SELECT content, sent_at FROM reply_drafts WHERE user_id=$1 AND chat_id=ids.chat_id AND status='sent' AND EXISTS(SELECT 1 FROM whatsapp_sessions ws WHERE ws.id=reply_drafts.session_id AND ws.user_id=reply_drafts.user_id AND ws.unipile_account_id=reply_drafts.account_id) ORDER BY sent_at DESC LIMIT 1) d ON true
     LEFT JOIN LATERAL (SELECT content FROM reply_drafts WHERE user_id=$1 AND chat_id=ids.chat_id AND status='draft' AND expires_at>NOW() AND EXISTS(SELECT 1 FROM whatsapp_sessions ws WHERE ws.id=reply_drafts.session_id AND ws.unipile_account_id=reply_drafts.account_id) ORDER BY created_at DESC LIMIT 1) pending ON true
     ORDER BY GREATEST(l.sent_at,c.last_message_at,d.sent_at) DESC NULLS LAST, ids.chat_id LIMIT 100 OFFSET $2`, [req.user!.id,offset])
@@ -221,7 +247,8 @@ assistantRouter.post('/realtime' , route(async (req, res) => {
 assistantRouter.post('/chat', route(async (req, res) => {
   const input = z.object({ question: z.string().trim().min(1).max(4000), message_id: z.string().uuid().optional().catch(undefined), history: z.array(z.object({ role: z.enum(['user','assistant']), content: z.string().max(6000) })).max(12).default([]) }).parse(req.body)
   const rows = await lunaContext(req.user!.id, input.question, input.message_id)
-  const answer = await askLuna(input.question, rows, input.history, 'chat', await userApiKey(req.user!.id), await userTimezone(req.user!.id))
+  const conversas = (await activeConversations(req.user!.id, 40)).map(conversationSummary)
+  const answer = await askLuna(input.question, rows, input.history, 'chat', await userApiKey(req.user!.id), await userTimezone(req.user!.id), { conversas_ativas: conversas })
   res.json({ success: true, data: { answer, sources: rows.length } })
 }))
 assistantRouter.post('/suggest', route(async (req, res) => {

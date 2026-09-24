@@ -170,6 +170,8 @@ export default function RealtimeVoice(props: Props) {
             if (typeof args.question !== 'string') throw new Error('Pergunta inválida')
             setCaption('Luna está consultando suas mensagens…')
             output = await api('/api/assistant/chat', { method: 'POST', signal: r.abort.signal, body: JSON.stringify({ question: args.question, message_id: args.message_id || selected.current, history: [] }) })
+          } else if (data.name === 'listar_conversas') {
+            output = await api('/api/assistant/active-conversations', { signal: r.abort.signal })
           } else if (data.name === 'ler_conversa') {
             if (typeof args.name !== 'string' || !args.name.trim()) throw new Error('Qual contato?')
             setCaption('Luna está lendo a conversa…')
