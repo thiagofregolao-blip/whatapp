@@ -34,11 +34,16 @@ export default function RealtimeVoice(props: Props) {
   selected.current = messageId
   const resources = useRef<VoiceResources | null>(null)
   const player = useRef<HTMLAudioElement>(null)
+  // The microphone is kept between reconnections: iOS asks permission again for every new capture.
+  const mic = useRef<MediaStream | null>(null)
+  const backgroundTimer = useRef<ReturnType<typeof setTimeout>>()
+  function releaseMic() { mic.current?.getTracks().forEach(t => t.stop()); mic.current = null }
 
-  function stop() {
+  function stop(release = false) {
     const r = resources.current
     resources.current = null
-    if (r) { log('voice.stopped'); clearTimeout(r.unmute); clearTimeout(r.timer); clearInterval(r.pump); r.abort.abort(); r.stream?.getTracks().forEach(t => t.stop()); r.channel?.close(); r.pc.close() }
+    if (r) { log('voice.stopped'); clearTimeout(r.unmute); clearTimeout(r.timer); clearInterval(r.pump); r.abort.abort(); if (r.stream !== mic.current) r.stream?.getTracks().forEach(t => t.stop()); r.channel?.close(); r.pc.close() }
+    if (release) { clearTimeout(backgroundTimer.current); releaseMic() }
     if (player.current) { player.current.pause(); player.current.srcObject = null }
     setPhase('idle');setTalking(false)
   }
@@ -49,9 +54,23 @@ export default function RealtimeVoice(props: Props) {
     const readPreferences = () => { alertMode.current = localStorage.getItem('nexo-alerts') || 'manual' }
     readPreferences(); window.addEventListener('nexo-preferences', readPreferences)
     check(); const timer = setInterval(check, 30000)
-    const hide = () => { if (document.hidden) { clearTimeout(retryTimer.current); stop() } else if (!pausedRef.current) { void startRef.current() } }
+    // Leaving the app briefly (checking WhatsApp, a notification) mutes instead of hanging up.
+    const hide = () => {
+      const r = resources.current
+      if (document.hidden) {
+        clearTimeout(retryTimer.current); clearTimeout(backgroundTimer.current)
+        r?.stream?.getAudioTracks().forEach(t => t.enabled = false)
+        backgroundTimer.current = setTimeout(() => stop(true), 120000)
+        return
+      }
+      clearTimeout(backgroundTimer.current)
+      if (pausedRef.current) return
+      const alive = r && r.pc.connectionState === 'connected' && r.channel?.readyState === 'open' && r.stream?.getAudioTracks().every(t => t.readyState === 'live')
+      if (alive) { if (!r.audioPlaying) r.stream!.getAudioTracks().forEach(t => t.enabled = true); log('voice.resumed'); return }
+      stop(); void startRef.current()
+    }
     document.addEventListener('visibilitychange', hide)
-    return () => { active = false; clearTimeout(retryTimer.current); window.removeEventListener('nexo-preferences', readPreferences); clearInterval(timer); document.removeEventListener('visibilitychange', hide); stop() }
+    return () => { active = false; clearTimeout(retryTimer.current); window.removeEventListener('nexo-preferences', readPreferences); clearInterval(timer); document.removeEventListener('visibilitychange', hide); stop(true) }
   }, [])
 
   async function start() {
@@ -63,8 +82,10 @@ export default function RealtimeVoice(props: Props) {
     const current = () => resources.current === r
     try {
       r.timer = setTimeout(() => { if (current()) { stop(); setError('A conexão de voz demorou demais. Tente novamente.') } }, 35000)
-      r.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
-      if (!current()) { r.stream.getTracks().forEach(t => t.stop()); return }
+      const kept = mic.current?.getAudioTracks().every(t => t.readyState === 'live') ? mic.current : null
+      r.stream = kept || await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      mic.current = r.stream; r.stream.getAudioTracks().forEach(t => t.enabled = true)
+      if (!current()) return
       r.stream.getTracks().forEach(track => r.pc.addTrack(track, r.stream!))
       r.pc.ontrack = event => {
         if (current() && player.current) { player.current.srcObject = event.streams[0]; player.current.play().catch(() => setNeedsAudio(true)) }
@@ -149,10 +170,13 @@ export default function RealtimeVoice(props: Props) {
             if (typeof args.question !== 'string') throw new Error('Pergunta inválida')
             setCaption('Luna está consultando suas mensagens…')
             output = await api('/api/assistant/chat', { method: 'POST', signal: r.abort.signal, body: JSON.stringify({ question: args.question, message_id: args.message_id || selected.current, history: [] }) })
-          } else if (['buscar_contatos','ler_conversa'].includes(data.name)) {
+          } else if (data.name === 'ler_conversa') {
+            if (typeof args.name !== 'string' || !args.name.trim()) throw new Error('Qual contato?')
+            setCaption('Luna está lendo a conversa…')
+            output = await api(`/api/assistant/conversation?name=${encodeURIComponent(args.name)}`, { signal: r.abort.signal })
+          } else if (data.name === 'buscar_contatos') {
             if (typeof args.name !== 'string') throw new Error('Qual contato?')
             output = await api(`/api/whatsapp/contacts?q=${encodeURIComponent(args.name)}`)
-            if (data.name === 'ler_conversa' && output.total===1) {const contact=output.contacts[0];output={contact:contact.name,messages:(await api(`/api/whatsapp/messages/conversations/${encodeURIComponent(contact.chat_id)}`)).slice(-30).map((m:any)=>({message_id:m.id,de:m.from_me?'Você':m.sender_name || contact.name,quando:new Date(m.sent_at).toLocaleString('pt-BR'),texto:m.media_type==='audio'?(m.transcript?`[áudio transcrito] ${m.transcript}`:'[áudio não transcrito]'):m.content || `[${m.media_type || 'anexo'}]`}))}}
           } else if (['enviar_mensagem','preparar_mensagem'].includes(data.name)) {
             if (typeof args.recipient !== 'string' || typeof args.content !== 'string' || !args.content.trim() || args.content.length>4000) throw new Error('Informe o contato e a mensagem.')
             if (data.name === 'enviar_mensagem') {
@@ -182,7 +206,7 @@ export default function RealtimeVoice(props: Props) {
   }
   return <div className="luna-presence" role="region" aria-label="Luna por voz">
     <span className={`voice-dot ${phase === 'connected' ? 'listening' : ''}`} /><span className="voice-state">{paused ? 'Luna pausada' : phase === 'connected' ? talking ? 'Luna está falando' : 'Luna está ouvindo' : phase === 'connecting' ? 'Luna está conectando…' : configured === false ? 'Configure a IA em Perfil' : 'Luna · voz'}</span>
-    <button className="icon-button" aria-label={paused ? 'Retomar microfone' : 'Pausar microfone'} onClick={() => { pausedRef.current=!paused; setPaused(!paused); if (!paused) { clearTimeout(retryTimer.current); stop() } }}>{paused ? <MicOff size={18} /> : <Mic size={18} />}</button>
+    <button className="icon-button" aria-label={paused ? 'Retomar microfone' : 'Pausar microfone'} onClick={() => { pausedRef.current=!paused; setPaused(!paused); if (!paused) { clearTimeout(retryTimer.current); stop(true) } }}>{paused ? <MicOff size={18} /> : <Mic size={18} />}</button>
     {needsPermission && <button className="text-link" onClick={() => startRef.current()}>Permitir microfone</button>}
     {needsAudio && <button className="text-link" onClick={() => { player.current?.play().then(() => setNeedsAudio(false)).catch(() => setError('O navegador bloqueou o áudio.')) }}>Liberar áudio</button>}
     {error && <span className="voice-error" role="alert">{error}</span>}

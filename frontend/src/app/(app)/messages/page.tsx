@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
+import { useInboxVersion } from '@/lib/updates'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { api } from '@/lib/api'
@@ -24,6 +25,7 @@ export default function Conversations() {
   const [reply,setReply]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState(''),[loading,setLoading]=useState(true),[threadLoading,setThreadLoading]=useState(false)
   const [compose,setCompose]=useState(false),[contactQuery,setContactQuery]=useState(''),[contacts,setContacts]=useState<any[]>([]),[contactLoading,setContactLoading]=useState(false)
   const [syncing,setSyncing]=useState(false),[syncNotice,setSyncNotice]=useState(''),[onlyDrafts,setOnlyDrafts]=useState(false)
+  const inboxVersion=useInboxVersion(),refreshList=useRef<null|(()=>Promise<void>)>(null),refreshThread=useRef<null|(()=>Promise<void>)>(null)
   const sending=useRef(false),bottom=useRef<HTMLDivElement>(null),selectedId=useRef<string|null>(null)
   const store=`nexo-inbox:${user?.id || 'anonymous'}`
   useEffect(() => {if (!user?.id) return;try {const saved=JSON.parse(localStorage.getItem(store)||'{}');setRead(saved.read||{});setFavorites(saved.favorites||[])}catch{}},[store,user?.id])
@@ -33,14 +35,15 @@ export default function Conversations() {
     setRows([]);setActive(null);selectedId.current=null;setLoading(true)
     let alive=true,inflight=false,loaded=false
     async function refresh(){if(inflight)return;inflight=true;try{const data:Conversation[]=[];let batch:Conversation[];do{batch=await api(`/api/whatsapp/messages/conversations?offset=${data.length}`);data.push(...batch)}while(!loaded&&batch.length===100&&alive);if(alive){const first=!loaded;setRows(old=>first?data:[...data,...old.filter(c=>!data.some(n=>n.chat_id===c.chat_id))]);loaded=true}}catch(e:any){if(alive)setError(e.message)}finally{inflight=false;if(alive)setLoading(false)}}
-    refresh();const timer=setInterval(refresh,5000)
+    refresh();refreshList.current=refresh
     const sent=(e:Event)=>{const d=(e as CustomEvent).detail;if(selectedId.current===d.chat_id)setReply('');setRows(old=>old.map(c=>c.chat_id===d.chat_id?{...c,draft_content:undefined,outgoing_content:d.content,outgoing_at:new Date().toISOString(),from_me:true}:c));refresh()}
     const draft=(e:Event)=>{const d=(e as CustomEvent).detail;setRows(old=>old.some(c=>c.chat_id===d.chat_id)?old.map(c=>c.chat_id===d.chat_id?{...c,draft_content:d.content}:c):[{id:null,chat_id:d.chat_id,chat_name:d.recipient,chat_type:'individual',draft_content:d.content},...old]);selectedId.current=d.chat_id;setActive({id:d.message_id||null,chat_id:d.chat_id,chat_name:d.recipient,chat_type:d.chat_id.endsWith('@g.us')?'group':'individual',draft_content:d.content});setReply(d.content);window.scrollTo(0,0)}
     window.addEventListener('luna-draft',draft);window.addEventListener('luna-sent',sent)
-    return()=>{alive=false;clearInterval(timer);window.removeEventListener('luna-draft',draft);window.removeEventListener('luna-sent',sent)}
+    return()=>{alive=false;refreshList.current=null;window.removeEventListener('luna-draft',draft);window.removeEventListener('luna-sent',sent)}
   },[session?.connection_id,session?.history_received_at])
   const activeChatId=active?.chat_id
-  useEffect(()=>{if(!activeChatId)return;let alive=true,inflight=false;setThreadLoading(true);async function refresh(){if(inflight)return;inflight=true;try{const data=await api(`/api/whatsapp/messages/conversations/${encodeURIComponent(activeChatId!)}`);if(alive)setEntries(data)}catch(e:any){if(alive)setError(e.message)}finally{inflight=false;if(alive)setThreadLoading(false)}}refresh();const timer=setInterval(refresh,5000);return()=>{alive=false;clearInterval(timer)}},[activeChatId])
+  useEffect(()=>{if(!activeChatId)return;let alive=true,inflight=false;setThreadLoading(true);async function refresh(){if(inflight)return;inflight=true;try{const data=await api(`/api/whatsapp/messages/conversations/${encodeURIComponent(activeChatId!)}`);if(alive)setEntries(data)}catch(e:any){if(alive)setError(e.message)}finally{inflight=false;if(alive)setThreadLoading(false)}}refresh();refreshThread.current=refresh;return()=>{alive=false;refreshThread.current=null}},[activeChatId])
+  useEffect(()=>{if(!inboxVersion)return;void refreshList.current?.();void refreshThread.current?.()},[inboxVersion])
   useEffect(()=>{bottom.current?.parentElement?.scrollTo({top:bottom.current.parentElement.scrollHeight})},[entries.length])
   useEffect(()=>{if(!compose)return;let alive=true;setContactLoading(true);const timer=setTimeout(()=>api(`/api/whatsapp/contacts?q=${encodeURIComponent(contactQuery)}`).then(data=>{if(alive)setContacts(data.contacts)}).catch(e=>{if(alive)setError(e.message)}).finally(()=>{if(alive)setContactLoading(false)}),200);return()=>{alive=false;clearTimeout(timer)}},[compose,contactQuery])
   function open(c:Conversation){window.scrollTo(0,0);selectedId.current=c.chat_id;setActive(c);setEntries([]);setReply(c.draft_content||'');setError('');setCompose(false);persist({...read,[c.chat_id]:c.sent_at||new Date().toISOString()});if(c.id)window.dispatchEvent(new CustomEvent('luna-select',{detail:c.id}))}

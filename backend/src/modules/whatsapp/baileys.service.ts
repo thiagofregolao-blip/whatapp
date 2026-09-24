@@ -38,6 +38,17 @@ export function normalizeIncoming(raw: any, account: string, lib: any, includeOu
     mentions: content.extendedTextMessage?.contextInfo?.mentionedJid || audio?.contextInfo?.mentionedJid,
   } }
 }
+// Technical reason only (never content), to diagnose messages that are not stored.
+export function skipReason(raw: any, lib: any, includeOutgoing = true) {
+  const jid = String(raw.key?.remoteJid || '')
+  if (!raw.key?.id) return 'no_key'
+  if (raw.key.fromMe && !includeOutgoing) return 'from_me'
+  if (!/(@s\.whatsapp\.net|@g\.us|@lid)$/.test(jid)) return `jid_${jid.split('@')[1] || 'none'}`
+  if (!raw.message) return `no_message_stub_${raw.messageStubType ?? 'none'}`
+  if (raw.message.viewOnceMessage || raw.message.viewOnceMessageV2) return 'view_once'
+  const content = lib.normalizeMessageContent(raw.message)
+  return `type_${Object.keys(content || {}).filter(k => k !== 'messageContextInfo')[0] || 'empty'}`
+}
 async function sessionFor(userId: string): Promise<any> {
   return (await db.query('SELECT * FROM whatsapp_sessions WHERE user_id=$1',[userId])).rows[0] || null
 }
@@ -103,6 +114,7 @@ async function startSocket(session: any, retries=0): Promise<any> {
   }
   async function ingest(messages: any[], type: string) {
     let accepted = 0, stored = 0
+    const skipped: Record<string, number> = {}
     for (const raw of messages) {
       if (runtime.stopped || stopping) return
       const response=lib.normalizeMessageContent(raw.message)?.protocolMessage?.peerDataOperationRequestResponseMessage
@@ -114,7 +126,7 @@ async function startSocket(session: any, retries=0): Promise<any> {
         }
       }
       const event = normalizeIncoming(raw, session.unipile_account_id, lib, true)
-      if (!event) continue
+      if (!event) { const reason = skipReason(raw, lib); skipped[reason] = (skipped[reason] || 0) + 1; continue }
       accepted++
       const known = await db.query('SELECT COALESCE(name,notify) AS name FROM whatsapp_contacts WHERE user_id=$1 AND account_id=$2 AND (chat_id=$3 OR $3=ANY(aliases)) AND COALESCE(name,notify) IS NOT NULL UNION ALL SELECT name FROM whatsapp_chats WHERE user_id=$1 AND account_id=$2 AND chat_id=$3 LIMIT 1', [session.user_id,session.unipile_account_id,event.data.chat_id])
       if (event.data.is_group) {
@@ -129,7 +141,7 @@ async function startSocket(session: any, retries=0): Promise<any> {
       if (type === 'notify' && saved.media_type === 'audio' && !event.data.from_me) void transcribeMessage(session.user_id,saved.id).catch(() => {})
     }
     await db.query('UPDATE whatsapp_sessions SET last_activity_at=NOW() WHERE id=$1',[session.id])
-    console.info('[Baileys] Recebimento', { type, received: messages.length, accepted, stored })
+    console.info('[Baileys] Recebimento', { type, received: messages.length, accepted, stored, skipped: Object.keys(skipped).length ? skipped : undefined })
   }
   function queue(task: () => Promise<void>) {
     runtime.serial = runtime.serial.then(async () => {

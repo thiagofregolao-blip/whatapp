@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import RealtimeVoice from '@/components/realtime-voice'
 import { api, getMessages, getToken } from '@/lib/api'
 import { useApp } from '@/lib/app-context'
+import { useInboxVersion } from '@/lib/updates'
 import { InboxMessage as Message, ReviewDraft as Draft, unseenMessages, isSendCommand } from '@/lib/assistant-flow'
 
 type Turn = { role: 'user' | 'assistant'; content: string }
@@ -72,7 +73,8 @@ export default function Assistant() {
     catch (e: any) { setError(e.message) }
     finally { refreshLock.current = false; setLoading(false) }
   }, [])
-  useEffect(() => { refresh(); const timer = setInterval(refresh, 5000); return () => clearInterval(timer) }, [refresh])
+  const inboxVersion = useInboxVersion()
+  useEffect(() => { refresh() }, [refresh, inboxVersion])
   useEffect(() => { setVoiceSupported(Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)); return () => recognition.current?.abort() }, [])
   useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl) }, [audioUrl])
 
@@ -219,7 +221,7 @@ export default function Assistant() {
     {error && <p role="alert" className="rounded-xl bg-red-950 p-4 text-red-100 mb-4">{error}</p>}
     {notice && <p role="status" className="rounded-xl bg-[var(--nx-soft)] p-4 mb-4">{notice}</p>}
     <div className="grid lg:grid-cols-[340px_1fr] gap-5">
-      <section className="rounded-2xl bg-[var(--nx-panel)] border border-[var(--nx-line)] p-4"><div className="flex justify-between items-center"><h2 className="font-semibold">Caixa de entrada</h2><button className={button} onClick={refresh}>Atualizar</button></div><p className="text-xs text-[var(--nx-muted)] mt-2 mb-4">Últimas 80 mensagens recebidas · atualização a cada 5 s</p>
+      <section className="rounded-2xl bg-[var(--nx-panel)] border border-[var(--nx-line)] p-4"><div className="flex justify-between items-center"><h2 className="font-semibold">Caixa de entrada</h2><button className={button} onClick={refresh}>Atualizar</button></div><p className="text-xs text-[var(--nx-muted)] mt-2 mb-4">Últimas 80 mensagens recebidas · atualiza quando chega mensagem nova</p>
         {loading ? <p>Carregando mensagens…</p> : !messages.length ? <p className="text-[var(--nx-muted)] py-8">Nenhuma mensagem recebida ainda. Novas mensagens aparecerão aqui após a conexão.</p> : <div className="space-y-2 max-h-[420px] lg:max-h-[680px] overflow-y-auto">{messages.map(m => <button key={m.id} onClick={() => selectMessage(m)} className={`w-full text-left rounded-xl p-3 border ${selected?.id === m.id ? 'border-[var(--nx-accent)] bg-[var(--nx-soft)]/40' : 'border-[var(--nx-line)] bg-white/[.02]'}`}><div className="flex justify-between gap-2"><strong className="text-sm break-words">{m.chat_name || m.sender_name || m.chat_id}</strong>{m.urgency_score >= 4 && <span className="text-xs text-amber-300">Atenção</span>}</div><p className="text-xs text-[var(--nx-muted)] mt-1">{m.sender_name || 'Contato'} · {new Date(m.sent_at).toLocaleString('pt-BR')}</p><p className="text-sm mt-2 line-clamp-2 break-words">{m.media_type === 'audio' ? (m.transcript ? `🎙 ${m.transcript}` : '▶ Mensagem de áudio') : m.content || 'Anexo recebido'}</p></button>)}</div>}
       </section>
       <section className="space-y-4 min-w-0">

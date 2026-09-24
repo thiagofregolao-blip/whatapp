@@ -2,7 +2,7 @@ import { recordDiagnostic } from './diagnostics'
 import { Router, Request, Response, NextFunction } from 'express'
 import { z } from 'zod'
 import rateLimit from 'express-rate-limit'
-import { askLuna, createVoiceCall, textModel, voiceModel } from './openai'
+import { askLuna, createVoiceCall, formatForLuna, textModel, voiceModel } from './openai'
 import { db } from '../../database/connection'
 import { authenticate } from '../../middleware/auth'
 import { audioBytes, transcribeMessage, transcribePending } from './transcription'
@@ -51,6 +51,30 @@ async function lunaContext(userId: string, question: string, messageId?: string)
   return all
 }
 
+// Reads a conversation by the name the user said. The same person often exists twice
+// (phone JID and @lid), so entries with the same name are merged into one conversation.
+assistantRouter.get('/conversation', route(async (req, res) => {
+  const name = z.string().trim().min(1).max(100).parse(req.query.name)
+  const matches = await directory(req.user!.id, name)
+  const groups = new Map<string, { name: string; chats: string[] }>()
+  for (const c of matches) {
+    const key = normalizedName(c.name || c.chat_id)
+    const g: { name: string; chats: string[] } = groups.get(key) || { name: c.name || c.chat_id, chats: [] }
+    g.chats.push(c.chat_id, ...((c.aliases as string[] | null) ?? [])); groups.set(key, g)
+  }
+  res.setHeader('Cache-Control', 'no-store')
+  if (!groups.size) return res.json({ success: true, data: { status: 'not_found', message: 'Contato não encontrado na agenda sincronizada. Diga isso em uma frase; não peça ID.' } })
+  const allChats = [...new Set([...groups.values()].flatMap(g => g.chats))]
+  const activity = new Map<string, Date>((await db.query(`SELECT chat_id, MAX(sent_at) AS last FROM messages WHERE user_id=$1 AND chat_id=ANY($2::text[]) AND ${visible} GROUP BY chat_id`, [req.user!.id, allChats])).rows.map(r => [r.chat_id, r.last]))
+  const candidates = [...groups.values()].map(g => ({ ...g, last: g.chats.map(c => activity.get(c)).filter(Boolean).sort((a: any, b: any) => b - a)[0] as Date | undefined }))
+  const withMessages = candidates.filter(g => g.last)
+  const pick = candidates.length === 1 ? candidates[0] : withMessages.length === 1 ? withMessages[0] : null
+  if (!pick) return res.json({ success: true, data: { status: 'ambiguous', message: 'Pergunte qual contato pelo nome completo e chame ler_conversa de novo com o nome escolhido. Nunca peça IDs.', contatos: (withMessages.length ? withMessages : candidates).sort((a, b) => (b.last?.getTime() || 0) - (a.last?.getTime() || 0)).slice(0, 8).map(g => ({ nome: g.name, ultima_mensagem: g.last || null })) } })
+  const rows = (await conversationRows(req.user!.id, [...new Set(pick.chats)], 30)).sort((a, b) => new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime()).slice(0, 30)
+  await transcribePending(req.user!.id, rows)
+  res.json({ success: true, data: { status: rows.length ? 'ok' : 'empty', contato: pick.name, mensagens: formatForLuna(rows, await userTimezone(req.user!.id)), message: rows.length ? undefined : 'O contato existe, mas ainda não há mensagens sincronizadas com ele.' } })
+}))
+
 assistantRouter.post('/drafts/by-contact', route(async (req,res) => {
   const input=z.object({recipient:z.string().trim().min(1).max(100),content:z.string().trim().min(1).max(4000)}).strict().parse(req.body)
   res.json({success:true,data:await createNamedDraft(req.user!.id,input.recipient,input.content)})
@@ -94,6 +118,12 @@ messagesRouter.get('/conversations/:chatId', route(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store'); res.json({ success: true, data: result.rows.reverse() })
 }))
 
+// Cheap change marker: screens reload only when something actually changed.
+messagesRouter.get('/updates', route(async (req, res) => {
+  const v = (await db.query(`SELECT (SELECT COUNT(*) || ':' || COALESCE(MAX(sent_at)::text,'') || ':' || COALESCE(MAX(transcribed_at)::text,'') FROM messages WHERE user_id=$1) || '|' ||
+    (SELECT COUNT(*) || ':' || COALESCE(MAX(GREATEST(created_at, sent_at))::text,'') FROM reply_drafts WHERE user_id=$1) AS version`, [req.user!.id])).rows[0].version
+  res.setHeader('Cache-Control', 'no-store'); res.json({ success: true, data: { version: v } })
+}))
 messagesRouter.get('/:id', route(async (req,res) => {
   const id = z.string().uuid().parse(req.params.id)
   const found = await db.query(`SELECT id, chat_id, chat_name, sender_name, content, media_type, sent_at, urgency_score, transcript, transcript_status FROM messages WHERE user_id=$1 AND id=$2 AND ${visible}`, [req.user!.id,id])
