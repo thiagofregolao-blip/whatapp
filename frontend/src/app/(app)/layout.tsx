@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { getMe, getWhatsappStatus } from '@/lib/api'
 import { AppContext } from '@/lib/app-context'
+import { isInstalledPhoneApp } from '@/lib/pwa'
 import AssistantWorkspace from '@/components/assistant-workspace'
 import { Avatar, icons } from '@/components/nexo-ui'
 const { MessageCircle, UserRound, Sparkles, Search } = icons
@@ -13,12 +14,15 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState('')
   const [theme, setTheme] = useState('light')
   const path = usePathname()
+  const [allowed, setAllowed] = useState(false)
   async function refreshUser() {
     setError('')
     try { setUser(await getMe()); setSession(await getWhatsappStatus()) }
     catch (e: any) { setError(e.message) }
   }
   useEffect(() => {
+    if (!isInstalledPhoneApp()) { window.location.replace('/connect'); return }
+    setAllowed(true)
     if (!localStorage.getItem('access_token')) { window.location.href='/auth/login'; return }
     refreshUser()
     const readTheme = () => setTheme(localStorage.getItem('luna-theme') || 'light')
@@ -26,6 +30,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     const timer = setInterval(() => getWhatsappStatus().then(setSession).catch(() => {}), 15000)
     return () => { clearInterval(timer); window.removeEventListener('nexo-preferences', readTheme) }
   }, [])
+  if (!allowed) return null
   return <AppContext.Provider value={{ user, session, refreshUser }}>
     <div className="nexo-shell" data-theme={theme}>
       <header className="nexo-header"><h1>{path === '/messages' ? 'Mensagens' : path === '/assistant' ? 'Luna' : path === '/settings' ? 'Perfil' : 'WhatsApp'}</h1><div className="header-actions"><button aria-label="Buscar mensagens" className="icon-button" onClick={() => { window.dispatchEvent(new Event('luna-search')) }}><Search /></button><Link href="/settings" className="profile-link" aria-label="Abrir perfil"><Avatar name={user?.name || user?.email || 'Você'} chatId="self" /></Link></div></header>
