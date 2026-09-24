@@ -5,7 +5,7 @@ import rateLimit from 'express-rate-limit'
 import { askLuna, createVoiceCall, textModel, voiceModel } from './openai'
 import { db } from '../../database/connection'
 import { authenticate } from '../../middleware/auth'
-import { audioOriginal } from '../whatsapp/baileys.service'
+import { audioBytes, transcribeMessage, transcribePending } from './transcription'
 import { encryptUserKey, userAiSettings, userApiKey } from './credentials'
 import { createDraft, createChatDraft, createNamedDraft, sendDraft } from './replies'
 import { directory, normalizedName } from '../whatsapp/contacts'
@@ -17,7 +17,7 @@ assistantRouter.use(authenticate)
 messagesRouter.use(authenticate)
 const visible = '(expires_at IS NULL OR expires_at > NOW())'
 const userTimezone = async (userId: string) => (await db.query('SELECT timezone FROM users WHERE id=$1', [userId])).rows[0]?.timezone || 'America/Sao_Paulo'
-const lunaColumns = 'id, chat_id, chat_name, chat_type, sender_name, content, media_type, sent_at, from_me'
+const lunaColumns = 'id, chat_id, chat_name, chat_type, sender_name, content, media_type, sent_at, from_me, transcript, transcript_status'
 
 // Contacts named in the question ("o que a Ana disse?"), most specific first.
 async function chatsNamedIn(userId: string, question: string) {
@@ -46,7 +46,9 @@ async function lunaContext(userId: string, question: string, messageId?: string)
   const recent = (await db.query(`SELECT ${lunaColumns} FROM messages WHERE user_id=$1 AND ${visible} AND sent_at > NOW() - INTERVAL '7 days' ORDER BY sent_at DESC LIMIT $2`, [userId, focus.length ? 40 : 80])).rows
   const rows = new Map<string, any>()
   for (const m of [...focused, ...recent]) if (!rows.has(m.id)) rows.set(m.id, { ...m, content: m.content?.slice(0, 2000), selected: m.id === selected?.id })
-  return [...rows.values()]
+  const all = [...rows.values()]
+  await transcribePending(userId, all)
+  return all
 }
 
 assistantRouter.post('/drafts/by-contact', route(async (req,res) => {
@@ -56,7 +58,7 @@ assistantRouter.post('/drafts/by-contact', route(async (req,res) => {
 
 messagesRouter.get('/', route(async (req, res) => {
   const q = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).default(0), group_id: z.string().uuid().optional(), min_urgency: z.coerce.number().int().min(1).max(5).default(1), only_mentions: z.enum(['true','false']).optional() }).parse(req.query)
-  const result = await db.query(`SELECT id, chat_id, chat_name, chat_type, sender_name, content, media_type, has_media, urgency_score, sent_at, is_mention FROM messages WHERE user_id=$1 AND from_me=false AND ${visible}
+  const result = await db.query(`SELECT id, chat_id, chat_name, chat_type, sender_name, content, media_type, has_media, urgency_score, sent_at, is_mention, transcript, transcript_status FROM messages WHERE user_id=$1 AND from_me=false AND ${visible}
     AND ($2::uuid IS NULL OR group_id=$2) AND urgency_score >= $3 AND ($4=false OR is_mention=true) ORDER BY sent_at DESC LIMIT $5 OFFSET $6`, [req.user!.id, q.group_id || null, q.min_urgency, q.only_mentions === 'true', q.limit, q.offset])
   res.json({ success: true, data: result.rows })
 }))
@@ -83,10 +85,10 @@ messagesRouter.get('/conversations', route(async (req, res) => {
 messagesRouter.get('/conversations/:chatId', route(async (req, res) => {
   const chat = z.string().min(1).max(256).parse(req.params.chatId)
   const result = await db.query(`SELECT * FROM (
-    SELECT id, content, media_type, sender_name, sent_at, from_me FROM messages
+    SELECT id, content, media_type, sender_name, sent_at, from_me, transcript, transcript_status FROM messages
       WHERE user_id=$1 AND chat_id=$2 AND EXISTS(SELECT 1 FROM whatsapp_sessions ws WHERE ws.id=messages.session_id AND ws.user_id=messages.user_id AND (messages.source_account_id IS NULL OR messages.source_account_id=ws.unipile_account_id)) AND (expires_at IS NULL OR expires_at>NOW()) AND NOT (from_me AND EXISTS(SELECT 1 FROM reply_drafts d WHERE d.user_id=messages.user_id AND d.provider_message_id=messages.provider_payload->'key'->>'id' AND d.status='sent'))
     UNION ALL
-    SELECT id, content, 'text' AS media_type, 'Você' AS sender_name, sent_at, true AS from_me FROM reply_drafts
+    SELECT id, content, 'text' AS media_type, 'Você' AS sender_name, sent_at, true AS from_me, NULL AS transcript, NULL AS transcript_status FROM reply_drafts
       WHERE user_id=$1 AND chat_id=$2 AND status='sent' AND EXISTS(SELECT 1 FROM whatsapp_sessions ws WHERE ws.id=reply_drafts.session_id AND ws.user_id=reply_drafts.user_id AND ws.unipile_account_id=reply_drafts.account_id)
     ) all_messages ORDER BY sent_at DESC LIMIT 100`, [req.user!.id, chat])
   res.setHeader('Cache-Control', 'no-store'); res.json({ success: true, data: result.rows.reverse() })
@@ -94,7 +96,7 @@ messagesRouter.get('/conversations/:chatId', route(async (req, res) => {
 
 messagesRouter.get('/:id', route(async (req,res) => {
   const id = z.string().uuid().parse(req.params.id)
-  const found = await db.query(`SELECT id, chat_id, chat_name, sender_name, content, media_type, sent_at, urgency_score FROM messages WHERE user_id=$1 AND id=$2 AND ${visible}`, [req.user!.id,id])
+  const found = await db.query(`SELECT id, chat_id, chat_name, sender_name, content, media_type, sent_at, urgency_score, transcript, transcript_status FROM messages WHERE user_id=$1 AND id=$2 AND ${visible}`, [req.user!.id,id])
   if (!found.rows[0]) return res.status(404).json({error:'Mensagem indisponível'})
   res.json({success:true,data:found.rows[0]})
 }))
@@ -102,31 +104,20 @@ messagesRouter.get('/:id', route(async (req,res) => {
 messagesRouter.get('/:id/audio', route(async (req, res) => {
   const id = z.string().uuid().parse(req.params.id)
   const found = await db.query(`SELECT m.*, ws.unipile_account_id FROM messages m JOIN whatsapp_sessions ws ON ws.id=m.session_id WHERE m.id=$1 AND m.user_id=$2 AND m.media_type='audio' AND (m.expires_at IS NULL OR m.expires_at > NOW()) AND ws.status='connected'`, [id, req.user!.id])
-  const m = found.rows[0]
-  if (m?.provider === 'baileys') {
-    try {
-      const audio = await audioOriginal(m)
-      res.setHeader('Content-Type',audio.type)
-      res.setHeader('Cache-Control','no-store')
-      return res.send(audio.bytes)
-    } catch (e: any) { return res.status(502).json({error:e.message}) }
-  }
-  if (!m?.attachment_id || !m.unipile_message_id) return res.status(404).json({ error: 'Áudio original indisponível no provedor' })
-  if (!process.env.UNIPILE_API_KEY || !process.env.UNIPILE_BASE_URL) return res.status(503).json({ error: 'Unipile não configurado' })
-  const upstream = await fetch(`${process.env.UNIPILE_BASE_URL}/api/v1/messages/${encodeURIComponent(m.unipile_message_id)}/attachments/${encodeURIComponent(m.attachment_id)}?account_id=${encodeURIComponent(m.unipile_account_id)}`, { headers: { 'X-API-KEY': process.env.UNIPILE_API_KEY }, signal: AbortSignal.timeout(30000), redirect: 'error' })
-  if (!upstream.ok) return res.status(502).json({ error: 'O provedor não disponibilizou este áudio' })
-  const type = upstream.headers.get('content-type') || ''
-  if (!type.startsWith('audio/') && !type.startsWith('application/octet-stream')) return res.status(502).json({ error: 'Formato de áudio inesperado' })
-  // Bound memory even when the provider omits Content-Length.
-  const chunks: Uint8Array[] = []; let size = 0
-  for await (const chunk of upstream.body as any) {
-    size += chunk.length
-    if (size > 25 * 1024 * 1024) throw new Error('Áudio excede 25 MB')
-    chunks.push(chunk)
-  }
-  res.setHeader('Content-Type', type)
+  if (!found.rows[0]) return res.status(404).json({ error: 'Áudio original indisponível no provedor' })
+  try {
+    const audio = await audioBytes(found.rows[0])
+    res.setHeader('Content-Type', audio.type)
+    res.setHeader('Cache-Control', 'no-store')
+    res.send(audio.bytes)
+  } catch (e: any) { res.status(502).json({ error: e.message }) }
+}))
+const transcribeLimit = rateLimit({ windowMs: 60000, max: 20, keyGenerator: req => req.user!.id, standardHeaders: true, legacyHeaders: false, message: { error: 'Aguarde um minuto antes de transcrever mais áudios.' } })
+messagesRouter.post('/:id/transcribe', transcribeLimit, route(async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id)
   res.setHeader('Cache-Control', 'no-store')
-  res.send(Buffer.concat(chunks))
+  try { res.json({ success: true, data: { id, transcript: await transcribeMessage(req.user!.id, id, true) } }) }
+  catch (e: any) { res.status(502).json({ success: false, error: e.message }) }
 }))
 
 assistantRouter.get('/status', route(async (req, res) => {

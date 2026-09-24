@@ -88,3 +88,6 @@ CREATE TABLE IF NOT EXISTS app_diagnostics (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS app_diagnostics_user_time ON app_diagnostics(user_id,created_at DESC);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS transcript TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS transcript_status TEXT CHECK (transcript_status IN ('done','failed'));
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS transcribed_at TIMESTAMPTZ;

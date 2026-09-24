@@ -152,7 +152,7 @@ export default function RealtimeVoice(props: Props) {
           } else if (['buscar_contatos','ler_conversa'].includes(data.name)) {
             if (typeof args.name !== 'string') throw new Error('Qual contato?')
             output = await api(`/api/whatsapp/contacts?q=${encodeURIComponent(args.name)}`)
-            if (data.name === 'ler_conversa' && output.total===1) {const contact=output.contacts[0];output={contact:contact.name,messages:(await api(`/api/whatsapp/messages/conversations/${encodeURIComponent(contact.chat_id)}`)).slice(-30).map((m:any)=>({message_id:m.id,de:m.from_me?'Você':m.sender_name || contact.name,quando:new Date(m.sent_at).toLocaleString('pt-BR'),texto:m.content || (m.media_type==='audio'?'[áudio não transcrito]':`[${m.media_type || 'anexo'}]`)}))}}
+            if (data.name === 'ler_conversa' && output.total===1) {const contact=output.contacts[0];output={contact:contact.name,messages:(await api(`/api/whatsapp/messages/conversations/${encodeURIComponent(contact.chat_id)}`)).slice(-30).map((m:any)=>({message_id:m.id,de:m.from_me?'Você':m.sender_name || contact.name,quando:new Date(m.sent_at).toLocaleString('pt-BR'),texto:m.media_type==='audio'?(m.transcript?`[áudio transcrito] ${m.transcript}`:'[áudio não transcrito]'):m.content || `[${m.media_type || 'anexo'}]`}))}}
           } else if (['enviar_mensagem','preparar_mensagem'].includes(data.name)) {
             if (typeof args.recipient !== 'string' || typeof args.content !== 'string' || !args.content.trim() || args.content.length>4000) throw new Error('Informe o contato e a mensagem.')
             if (data.name === 'enviar_mensagem') {

@@ -1,4 +1,4 @@
-export type InboxMessage = { id: string; chat_id: string; chat_name: string; sender_name: string; content: string; media_type: string; sent_at: string; urgency_score: number }
+export type InboxMessage = { id: string; chat_id: string; chat_name: string; sender_name: string; content: string; media_type: string; sent_at: string; urgency_score: number; transcript?: string | null; transcript_status?: string | null }
 export type ReviewDraft = { id: string; chat_id: string; content: string; confirmation_token: string; recipient: string; expires_at: string }
 export function unseenMessages(previous: Set<string> | null, rows: InboxMessage[]) {
   return previous === null ? [] : rows.filter(m => !previous.has(m.id)).reverse()

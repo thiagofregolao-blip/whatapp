@@ -5,6 +5,7 @@ import pino from 'pino'
 import { db } from '../../database/connection'
 import { databaseAuth } from './baileys-auth'
 import { saveMessage } from '../messages/messages.service'
+import { transcribeMessage } from '../assistant/transcription'
 import { UnipileWebhookEvent } from '../../types'
 
 const logger = pino({ level: 'silent' })
@@ -121,7 +122,11 @@ async function startSocket(session: any, retries=0): Promise<any> {
         event.data.chat_name = known.rows[0]?.name || group.rows[0]?.name || event.data.chat_id
       } else event.data.chat_name = known.rows[0]?.name || (!raw.key.fromMe && raw.pushName) || event.data.chat_id
       await rememberChats([{id:event.data.chat_id,name:event.data.chat_name,conversationTimestamp:event.data.timestamp}])
-      if (await saveMessage(session.user_id,session.id,event,{includeOutgoing:true})) stored++
+      const saved = await saveMessage(session.user_id,session.id,event,{includeOutgoing:true})
+      if (!saved) continue
+      stored++
+      // New incoming audio only: bulk history is transcribed on demand to spare the user's quota.
+      if (type === 'notify' && saved.media_type === 'audio' && !event.data.from_me) void transcribeMessage(session.user_id,saved.id).catch(() => {})
     }
     await db.query('UPDATE whatsapp_sessions SET last_activity_at=NOW() WHERE id=$1',[session.id])
     console.info('[Baileys] Recebimento', { type, received: messages.length, accepted, stored })
