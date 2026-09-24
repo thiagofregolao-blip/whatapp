@@ -82,15 +82,14 @@ assistantRouter.get('/conversation', route(async (req, res) => {
   // approximate, so the closest names win; the agenda is only a fallback.
   const conversations = await activeConversations(req.user!.id, 300)
   const scored = conversations.map(c => ({ ...c, score: nameScore(name, c.name) })).filter(c => c.score >= 0.75)
-  const best = Math.max(0, ...scored.map(c => c.score))
-  const active = scored.filter(c => c.score >= best - 0.05)
-  const matches = active.length ? active : (await directory(req.user!.id, name)).filter(c => nameScore(name, c.name || '') >= 0.9)
+  const matches: any[] = scored.length ? scored : (await directory(req.user!.id, name)).map(c => ({ ...c, score: nameScore(name, c.name || '') })).filter(c => c.score >= 0.9)
   const options = () => conversations.slice(0, 30).map(c => c.name)
-  const groups = new Map<string, { name: string; chats: string[] }>()
+  type Candidate = { name: string; chats: string[]; score: number; group: boolean; last?: Date }
+  const groups = new Map<string, Candidate>()
   for (const c of matches) {
     const key = normalizedName(c.name || c.chat_id)
-    const g: { name: string; chats: string[] } = groups.get(key) || { name: c.name || c.chat_id, chats: [] }
-    g.chats.push(c.chat_id, ...((c.aliases as string[] | null) ?? [])); groups.set(key, g)
+    const g: Candidate = groups.get(key) || { name: c.name || c.chat_id, chats: [], score: 0, group: String(c.chat_id).endsWith('@g.us') }
+    g.chats.push(c.chat_id, ...((c.aliases as string[] | null) ?? [])); g.score = Math.max(g.score, c.score); groups.set(key, g)
   }
   res.setHeader('Cache-Control', 'no-store')
   if (!groups.size) {
@@ -99,14 +98,16 @@ assistantRouter.get('/conversation', route(async (req, res) => {
   }
   const allChats = [...new Set([...groups.values()].flatMap(g => g.chats))]
   const activity = new Map<string, Date>((await db.query(`SELECT chat_id, MAX(sent_at) AS last FROM messages WHERE user_id=$1 AND chat_id=ANY($2::text[]) AND ${visible} GROUP BY chat_id`, [req.user!.id, allChats])).rows.map(r => [r.chat_id, r.last]))
-  const candidates = [...groups.values()].map(g => ({ ...g, last: g.chats.map(c => activity.get(c)).filter(Boolean).sort((a: any, b: any) => b - a)[0] as Date | undefined }))
-  const withMessages = candidates.filter(g => g.last)
-  const pick = candidates.length === 1 ? candidates[0] : withMessages.length === 1 ? withMessages[0] : null
-  void recordDiagnostic(req.user!.id, 'luna.conversation', pick ? 'ok' : 'ambiguous').catch(() => {})
-  if (!pick) return res.json({ success: true, data: { status: 'ambiguous', message: 'Pergunte qual contato pelo nome completo e chame ler_conversa de novo com o nome escolhido. Nunca peça IDs.', contatos: (withMessages.length ? withMessages : candidates).sort((a, b) => (b.last?.getTime() || 0) - (a.last?.getTime() || 0)).slice(0, 8).map(g => ({ nome: g.name, ultima_mensagem: g.last || null })) } })
+  for (const g of groups.values()) g.last = g.chats.map(c => activity.get(c)).filter(Boolean).sort((a: any, b: any) => b - a)[0]
+  // Never stall on similar names: read the most likely one (closest name, a person before a
+  // group, then the most recent) and mention the alternatives.
+  const ranked = [...groups.values()].sort((a, b) => b.score - a.score || Number(a.group) - Number(b.group) || (b.last?.getTime() || 0) - (a.last?.getTime() || 0))
+  const pick = ranked[0]
+  const others = ranked.slice(1, 4).map(g => g.name)
+  void recordDiagnostic(req.user!.id, 'luna.conversation', others.length ? 'ok_with_alternatives' : 'ok').catch(() => {})
   const rows = (await conversationRows(req.user!.id, [...new Set(pick.chats)], 30)).sort((a, b) => new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime()).slice(0, 30)
   await transcribePending(req.user!.id, rows)
-  res.json({ success: true, data: { status: rows.length ? 'ok' : 'empty', contato: pick.name, mensagens: formatForLuna(rows.map(m => ({ ...m, chat_name: pick.name })), await userTimezone(req.user!.id)), message: rows.length ? undefined : 'O contato existe, mas ainda não há mensagens sincronizadas com ele.' } })
+  res.json({ success: true, data: { status: rows.length ? 'ok' : 'empty', contato: pick.name, outros_parecidos: others.length ? others : undefined, orientacao: others.length ? 'Responda sobre esta conversa. Se o usuário quis outra pessoa, ele dirá; então chame ler_conversa com o nome dela.' : undefined, mensagens: formatForLuna(rows.map(m => ({ ...m, chat_name: pick.name })), await userTimezone(req.user!.id)), message: rows.length ? undefined : 'O contato existe, mas ainda não há mensagens sincronizadas com ele.' } })
 }))
 
 assistantRouter.post('/drafts/by-contact', route(async (req,res) => {
