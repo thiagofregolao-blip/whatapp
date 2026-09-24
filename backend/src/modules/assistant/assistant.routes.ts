@@ -8,7 +8,7 @@ import { authenticate } from '../../middleware/auth'
 import { audioBytes, transcribeMessage, transcribePending } from './transcription'
 import { encryptUserKey, userAiSettings, userApiKey } from './credentials'
 import { createDraft, createChatDraft, createNamedDraft, sendDraft } from './replies'
-import { directory, matchContacts, normalizedName } from '../whatsapp/contacts'
+import { directory, nameScore, normalizedName } from '../whatsapp/contacts'
 
 export const assistantRouter = Router()
 export const messagesRouter = Router()
@@ -78,9 +78,14 @@ assistantRouter.get('/active-conversations', route(async (req, res) => {
 // (phone JID and @lid), so entries with the same name are merged into one conversation.
 assistantRouter.get('/conversation', route(async (req, res) => {
   const name = z.string().trim().min(1).max(100).parse(req.query.name)
-  // Active conversations first: that is where the user expects Luna to look.
-  const active = matchContacts(await activeConversations(req.user!.id, 300), name)
-  const matches = active.length ? active : await directory(req.user!.id, name)
+  // Active conversations first: that is where the user expects Luna to look. Spoken names are
+  // approximate, so the closest names win; the agenda is only a fallback.
+  const conversations = await activeConversations(req.user!.id, 300)
+  const scored = conversations.map(c => ({ ...c, score: nameScore(name, c.name) })).filter(c => c.score >= 0.75)
+  const best = Math.max(0, ...scored.map(c => c.score))
+  const active = scored.filter(c => c.score >= best - 0.05)
+  const matches = active.length ? active : (await directory(req.user!.id, name)).filter(c => nameScore(name, c.name || '') >= 0.9)
+  const options = () => conversations.slice(0, 30).map(c => c.name)
   const groups = new Map<string, { name: string; chats: string[] }>()
   for (const c of matches) {
     const key = normalizedName(c.name || c.chat_id)
@@ -88,12 +93,16 @@ assistantRouter.get('/conversation', route(async (req, res) => {
     g.chats.push(c.chat_id, ...((c.aliases as string[] | null) ?? [])); groups.set(key, g)
   }
   res.setHeader('Cache-Control', 'no-store')
-  if (!groups.size) return res.json({ success: true, data: { status: 'not_found', message: 'Contato não encontrado na agenda sincronizada. Diga isso em uma frase; não peça ID.' } })
+  if (!groups.size) {
+    void recordDiagnostic(req.user!.id, 'luna.conversation', 'not_found').catch(() => {})
+    return res.json({ success: true, data: { status: 'not_found', conversas_ativas: options(), message: 'Nenhum nome parecido. Se um nome de conversas_ativas soa como o que o usuário disse (a transcrição de voz erra nomes), chame ler_conversa com esse nome exato. Senão, diga em uma frase que não achou e cite 2 ou 3 conversas recentes.' } })
+  }
   const allChats = [...new Set([...groups.values()].flatMap(g => g.chats))]
   const activity = new Map<string, Date>((await db.query(`SELECT chat_id, MAX(sent_at) AS last FROM messages WHERE user_id=$1 AND chat_id=ANY($2::text[]) AND ${visible} GROUP BY chat_id`, [req.user!.id, allChats])).rows.map(r => [r.chat_id, r.last]))
   const candidates = [...groups.values()].map(g => ({ ...g, last: g.chats.map(c => activity.get(c)).filter(Boolean).sort((a: any, b: any) => b - a)[0] as Date | undefined }))
   const withMessages = candidates.filter(g => g.last)
   const pick = candidates.length === 1 ? candidates[0] : withMessages.length === 1 ? withMessages[0] : null
+  void recordDiagnostic(req.user!.id, 'luna.conversation', pick ? 'ok' : 'ambiguous').catch(() => {})
   if (!pick) return res.json({ success: true, data: { status: 'ambiguous', message: 'Pergunte qual contato pelo nome completo e chame ler_conversa de novo com o nome escolhido. Nunca peça IDs.', contatos: (withMessages.length ? withMessages : candidates).sort((a, b) => (b.last?.getTime() || 0) - (a.last?.getTime() || 0)).slice(0, 8).map(g => ({ nome: g.name, ultima_mensagem: g.last || null })) } })
   const rows = (await conversationRows(req.user!.id, [...new Set(pick.chats)], 30)).sort((a, b) => new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime()).slice(0, 30)
   await transcribePending(req.user!.id, rows)
@@ -268,4 +277,4 @@ assistantRouter.post('/drafts/:id/send', route(async (req, res) => {
   const input = z.object({ authorize: z.literal(true), confirmation_token: z.string().length(64), chat_id: z.string().min(1), content: z.string().min(1).max(4000) }).strict().parse(req.body)
   res.json({ success: true, data: await sendDraft(req.user!.id, id, input) })
 }))
-assistantRouter.use((err: Error, _req: Request, res: Response, _next: NextFunction) => res.status(400).json({ success: false, error: err instanceof z.ZodError ? 'Dados inválidos; revise sua solicitação' : err.message }))
+assistantRouter.use((err: Error, req: Request, res: Response, _next: NextFunction) => (console.warn('[Assistant]', req.path, err instanceof z.ZodError ? 'invalid_input' : err.message), res.status(400)).json({ success: false, error: err instanceof z.ZodError ? 'Dados inválidos; revise sua solicitação' : err.message }))

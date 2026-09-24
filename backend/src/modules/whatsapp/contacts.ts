@@ -28,3 +28,26 @@ export async function rememberContacts(userId: string, account: string, contacts
     if ('imgUrl' in c) await db.query('UPDATE whatsapp_contacts SET photo_checked_at=NULL WHERE user_id=$1 AND account_id=$2 AND chat_id=$3',[userId,account,c.id])
   }
 }
+
+function similarity(a: string, b: string) {
+  if (a === b) return 1
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)])
+  for (let j = 1; j <= b.length; j++) d[0][j] = j
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1))
+  return 1 - d[a.length][b.length] / Math.max(a.length, b.length)
+}
+// Rough Portuguese/Spanish sound key, so "Lise" and "Liceh" compare as equal.
+const sound = (w: string) => w.replace(/(?<![cln])h/g, '').replace(/c(?=[ei])/g, 's').replace(/[zç]/g, 's').replace(/ss/g, 's').replace(/qu(?=[ei])/g, 'k').replace(/y/g, 'i').replace(/w/g, 'v').replace(/(.)\1/g, '$1')
+const close = (t: string, w: string) => Math.max(similarity(t, w), similarity(sound(t), sound(w)))
+// Spoken names are approximate ("Beto" for "vobeto", "Lise" for "Liceh"): score 0..1.
+export function nameScore(query: string, name: string) {
+  const q = normalizedName(query), n = normalizedName(name)
+  if (!q || !n) return 0
+  if (q === n) return 1
+  if (n.includes(q) && q.length >= 3) return 0.95
+  const words = n.split(' ')
+  const tokens = q.split(' ').filter(t => t.length >= 2)
+  if (!tokens.length) return 0
+  const perToken = tokens.map(t => Math.max(...words.map(w => w.startsWith(t) ? 0.95 : w.includes(t) && t.length >= 3 ? 0.9 : close(t, w))))
+  return perToken.reduce((a, b) => a + b, 0) / perToken.length
+}
